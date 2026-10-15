@@ -147,6 +147,34 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn('Sample Employee', str(ctx.exception))
         self.assertEqual(ctx.exception.detail, 'Sample Employee, 15 Oct 2026: tracker has PL, Slack requested SL')
 
+    def test_unparseable_request_is_skipped_only_when_provably_over(self):
+        today = date(2026, 10, 15)
+        def msg(text):
+            return {'bot_id': 'B1', 'ts': '1', 'text': text}
+        # unsupported wording, every date already past: harmless, skipped
+        self.assertIsNone(parse_request(msg('<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-09-25.'), today))
+        # a date today or later, or no date at all, or no 'today' context: still fails closed
+        for text in ['<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-10-15.',
+                     '<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-11-02.',
+                     '<@U1> applied a Unplanned something odd']:
+            with self.assertRaises(DigestError):
+                parse_request(msg(text), today)
+        with self.assertRaises(DigestError):
+            parse_request(msg('<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-09-25.'))
+        # impossible dates are ignored when deciding; a real future date still blocks
+        with self.assertRaises(DigestError):
+            parse_request(msg('<@U1> applied a Unplanned - WFH 2026-13-45 to 2027-01-02.'), today)
+        # reversed range that ended in the past is skipped; matched format but invalid date too
+        self.assertIsNone(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-09-26 to 2026-09-24. Full Day'), today))
+        self.assertIsNone(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-09-31 to 2026-09-24. Full Day'), today))
+        # a valid current request is unaffected
+        self.assertEqual(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-10-15 to 2026-10-16. Half Day'), today).code, 'HD')
+
+    def test_slack_history_skips_ended_unparseable_but_not_current(self):
+        old = {'bot_id': 'BSOURCE', 'ts': '1', 'text': '<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-09-25.'}
+        ok = {'bot_id': 'BSOURCE', 'text': SlackAndStateTests.TEXT}
+        self.assertEqual(len(SlackAndStateTests().history([{'ok': True, 'messages': [old, ok]}])), 1)
+
     def test_unsupported_format_detail_has_ids_not_message_text(self):
         with self.assertRaises(DigestError) as ctx:
             parse_request({'bot_id': 'B1', 'ts': '1760500000.1', 'user': 'U9', 'text': '<@U123> applied a Unplanned reason: private'})

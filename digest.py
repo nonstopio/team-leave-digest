@@ -96,26 +96,44 @@ REQUEST = re.compile(
 )
 
 
-def parse_request(message):
+def ended(text, today):
+    """True only if the text names at least one date and every date is before today."""
+    days = []
+    for raw in re.findall(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            days.append(date.fromisoformat(raw))
+        except ValueError:
+            pass
+    return bool(days) and today is not None and max(days) < today
+
+
+def parse_request(message, today=None):
     # Workflow messages are bot-authored; the mentioned employee is the applicant.
     if not message.get("bot_id"):
         return None
     text = message.get("text", "").replace("*", "")
+    ts = message.get("ts", "?")
+
+    def reject(problem, detail):
+        # A request we cannot read but whose dates are all in the past cannot affect the
+        # calendar or the digest, so it must not block the run. Anything else fails closed.
+        if ended(text, today):
+            return None
+        raise DigestError(f"{problem} (Slack message ts {ts}); inspect Slack privately.", "conflict", detail)
+
     match = REQUEST.search(text)
     if not match:
         if "unplanned" in text.casefold() and "applied a" in text.casefold():
-            raise DigestError(f"A leave workflow request has an unsupported format (Slack message ts {message.get('ts', '?')}); inspect Slack privately.", "conflict",
-                          f"Slack message ts {message.get('ts', '?')}, user {message.get('user', '?')}")
+            return reject("A leave workflow request has an unsupported format",
+                          f"Slack message ts {ts}, user {message.get('user', '?')}")
         return None
     user, start, end, duration = match.groups()
     try:
         start, end = date.fromisoformat(start), date.fromisoformat(end)
     except ValueError:
-        raise DigestError(f"A Slack request contains an invalid date (Slack message ts {message.get('ts', '?')}).", "conflict",
-                          f"Slack user {user}: {start} to {end}") from None
+        return reject("A Slack request contains an invalid date", f"Slack user {user}: {start} to {end}")
     if end < start or (end - start).days > 366:
-        raise DigestError(f"A Slack request has an invalid date range (Slack message ts {message.get('ts', '?')}).", "conflict",
-                          f"Slack user {user}: {start} to {end}")
+        return reject("A Slack request has an invalid date range", f"Slack user {user}: {start} to {end}")
     return Leave(user, start, end, "SL" if duration.casefold() == "full day" else "HD")
 
 
@@ -344,7 +362,7 @@ def slack_requests(today, last_day):
             source = os.getenv("SLACK_LEAVE_BOT_ID", "")
             if source and message.get("bot_id") != source:
                 continue
-            leave = parse_request(message)
+            leave = parse_request(message, today)
             if leave is None and message.get("bot_id"):
                 ignored += 1
             if leave and leave.end >= today and leave.start <= last_day:
