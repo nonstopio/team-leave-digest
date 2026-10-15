@@ -104,17 +104,17 @@ def parse_request(message):
     match = REQUEST.search(text)
     if not match:
         if "unplanned" in text.casefold() and "applied a" in text.casefold():
-            raise DigestError("A leave workflow request has an unsupported format; inspect Slack privately.", "conflict",
+            raise DigestError(f"A leave workflow request has an unsupported format (Slack message ts {message.get('ts', '?')}); inspect Slack privately.", "conflict",
                           f"Slack message ts {message.get('ts', '?')}, user {message.get('user', '?')}")
         return None
     user, start, end, duration = match.groups()
     try:
         start, end = date.fromisoformat(start), date.fromisoformat(end)
     except ValueError:
-        raise DigestError("A Slack request contains an invalid date.", "conflict",
+        raise DigestError(f"A Slack request contains an invalid date (Slack message ts {message.get('ts', '?')}).", "conflict",
                           f"Slack user {user}: {start} to {end}") from None
     if end < start or (end - start).days > 366:
-        raise DigestError("A Slack request has an invalid date range.", "conflict",
+        raise DigestError(f"A Slack request has an invalid date range (Slack message ts {message.get('ts', '?')}).", "conflict",
                           f"Slack user {user}: {start} to {end}")
     return Leave(user, start, end, "SL" if duration.casefold() == "full day" else "HD")
 
