@@ -25,7 +25,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
 
    **Rollout:** while testing, set both secrets to the same test-channel URL. Before pointing `TEAMS_WEBHOOK_URL` at the real leadership channel, make sure `ALERT_WEBHOOK_URL` is the owners' channel, then change only `TEAMS_WEBHOOK_URL`.
 
-   Employee mappings live in the private tracker, not GitHub secrets. The tracker needs an **Employee Mapping** tab with `Slack User ID` and `Tracker Name` in A1:B1 and one row per team member. This list is the team: only mapped people are processed.
+   Employee mappings live in the private tracker, not GitHub secrets. The tracker needs an **Employee Mapping** tab with `Slack User ID` and `Tracker Name` in A1:B1 and one row per team member. This list is the team: only mapped people are processed. Optional extra columns may follow; a column headed `Role` is used to hide people from the leadership digest: anyone whose role contains `Shadow` (e.g. `Shadow QA`) is left out of the digest. Their leave is still written to the monthly calendar. A role change during a run is treated as a changed mapping and stops the run.
 
    Fill column A with each person's Slack member ID (profile → More → Copy member ID). Column B must match the calendar's exact name. Names without IDs can stay as placeholders, but Slack applicants who are not in the mapping are treated as outside this team: they are ignored and only a count is logged. A team member whose Slack ID is missing is therefore also ignored, so keep the IDs complete. Duplicate IDs, duplicate mapped names, invalid IDs and missing names stop the job. No employee mapping JSON secret or `users:read` scope is required.
 

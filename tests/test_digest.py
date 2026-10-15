@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 import digest
-from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, make_digest, parse_request, webhook_url
+from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, make_digest, parse_request, shadow_names, webhook_url
 
 
 def month(name_col=2):
@@ -150,6 +150,19 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(len(bullets.split('\n')), 50)
         self.assertIn('...and 11 more', texts)
 
+    def test_shadow_roles_are_found_by_header_and_hidden_from_digest(self):
+        rows = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U1', 'Sample Employee', 'Shadow QA', 'V1'],
+                ['', 'Placeholder Person', 'shadow developer', 'V1'], ['U2', 'Other Person', 'Backend', 'V1'],
+                ['U3', 'Lead Person', 'Lead', 'V1']]
+        self.assertEqual(shadow_names(rows), {'sample employee', 'placeholder person'})
+        self.assertEqual(shadow_names([['Slack User ID', 'Tracker Name']]), frozenset())  # no Role column: nothing hidden
+        self.assertEqual(shadow_names([]), frozenset())
+        self.assertEqual(digest.employee_mapping(rows), {'U1': 'Sample Employee', 'U2': 'Other Person', 'U3': 'Lead Person'})
+        m, today = month(), date(2026, 10, 15)
+        m.rows[1][m.dates[today]] = 'SL'
+        self.assertIn('Sample Employee', make_digest([m], today, today))
+        self.assertNotIn('Sample Employee', make_digest([m], today, today, shadow_names(rows)))
+
     def test_alert_card_has_attention_header_and_run_link(self):
         card = build_card('Leave digest NOT sent', 'attention', 'Fix it.', 'https://example.invalid/run/1')
         content = card['attachments'][0]['content']
@@ -243,11 +256,19 @@ class DigestTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False, leaves=None, post_error=None,
-                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15)):
+                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None):
         rows = month().rows
         sheets = Mock()
-        mapping_rows = [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
-        sheets.read.side_effect = lambda title, area: copy.deepcopy(mapping_rows if title == 'Employee Mapping' else rows)
+        mapping_rows = mapping_extra or [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
+        mapping_reads = []
+
+        def read(title, area, render='FORMULA'):
+            if title != 'Employee Mapping':
+                return copy.deepcopy(rows)
+            mapping_reads.append(1)
+            later = mapping_later is not None and len(mapping_reads) > 1
+            return copy.deepcopy(mapping_later if later else mapping_rows)
+        sheets.read.side_effect = read
         sheets.state.return_value = (status, 2)
         if changed:
             modified = copy.deepcopy(rows)
@@ -367,6 +388,23 @@ class MainTests(unittest.TestCase):
         self.assertIn('NOT sent', body)
         self.assertIn('Sample Employee, 15 Oct 2026: tracker has PL, Slack requested SL', body)  # owners' channel only
         self.assertNotIn('Sample Employee', str(error))  # ...never the public message/log line
+
+    def test_shadow_leave_is_written_to_sheet_but_not_posted(self):
+        mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'Shadow QA', 'V1']]
+        sheets, post, error = self.run_job('live', mapping_extra=mapping)
+        self.assertIsNone(error)
+        self.assertEqual(len(sheets.write.call_args.args[0]), 1)  # sheet still updated
+        card = str(post.call_args_list[0].kwargs['json'])
+        self.assertNotIn('Sample Employee', card)
+        self.assertIn('Sick/Emergency Leaves', card)
+
+    def test_role_change_during_run_is_treated_as_stale(self):
+        first = [['Slack User ID', 'Tracker Name', 'Role'], ['U123', 'Sample Employee', 'QA']]
+        later = [['Slack User ID', 'Tracker Name', 'Role'], ['U123', 'Sample Employee', 'Shadow QA']]
+        sheets, post, error = self.run_job('live', mapping_extra=first, mapping_later=later)
+        self.assertEqual(error.kind, 'stale')
+        sheets.write.assert_not_called()
+        self.assertEqual(self.posted(post), ['alert'])
 
     def test_applicants_outside_the_team_are_ignored_not_fatal(self):
         day = date(2026, 10, 15)
