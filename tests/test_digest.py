@@ -344,8 +344,16 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.posted(post), ['alert'])
         body = str(post.call_args.kwargs['json'])
         self.assertIn('NOT sent', body)
-        self.assertIn('Slack user U999', body)  # details reach the owners' channel only
+        self.assertIn('Slack user IDs: U999', body)  # details reach the owners' channel only
         self.assertNotIn('U999', str(error))    # ...never the public message/log line
+
+    def test_every_unmapped_applicant_is_reported_at_once(self):
+        day = date(2026, 10, 15)
+        leaves = [Leave(u, day, day, 'SL') for u in ('U123', 'U777', 'U555', 'U777')]
+        sheets, post, error = self.run_job('live', leaves=leaves)
+        self.assertIn('2 active Slack applicant(s)', str(error))
+        self.assertEqual(error.detail, 'Slack user IDs: U555, U777')
+        sheets.write.assert_not_called()
 
     def test_preview_never_alerts(self):
         _, post, error = self.run_job('preview', leaves=[Leave('U999', date(2026, 10, 15), date(2026, 10, 15), 'SL')])
