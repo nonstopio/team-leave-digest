@@ -41,6 +41,26 @@ def webhook_url(key):
     return value
 
 
+def retrying(call, attempts=3):
+    """Retry a read-only-or-idempotent HTTP call on network errors, 429 and 5xx (2s, 4s backoff).
+
+    One Sheets/Slack hiccup at run time must not cost the whole day's digest.
+    """
+    for n in range(attempts):
+        last = n == attempts - 1
+        try:
+            response = call()
+        except Exception:
+            if last:
+                raise
+            time.sleep(2 ** (n + 1))
+            continue
+        if getattr(response, "status_code", 200) in (429, 500, 502, 503, 504) and not last:
+            time.sleep(2 ** (n + 1))
+            continue
+        return response
+
+
 def cell(row, col):
     return row[col] if col < len(row) else ""
 
@@ -314,7 +334,10 @@ class Sheets:
         self.titles = {s["properties"]["title"] for s in self.request("GET", "", params={"fields": "sheets.properties.title"})["sheets"]}
 
     def request(self, method, path, **kwargs):
-        response = self.http.request(method, self.base + path, timeout=45, **kwargs)
+        try:
+            response = retrying(lambda: self.http.request(method, self.base + path, timeout=45, **kwargs))
+        except Exception:
+            raise DigestError("Google Sheets API could not be reached; check connectivity and try again.") from None
         if not response.ok:
             raise DigestError("Google Sheets API failed; check sharing, credentials, and calendar configuration.")
         return response.json()
@@ -361,8 +384,14 @@ def slack_requests(today, last_day):
     params = {"channel": required("SLACK_CHANNEL_ID"), "oldest": str(oldest), "limit": 100}
     results, ignored = [], 0
     for _ in range(100):
-        response = requests.get("https://slack.com/api/conversations.history", params=params,
-                                headers={"Authorization": "Bearer " + required("SLACK_BOT_TOKEN")}, timeout=45)
+        try:
+            response = retrying(lambda: requests.get(
+                "https://slack.com/api/conversations.history", params=params,
+                headers={"Authorization": "Bearer " + required("SLACK_BOT_TOKEN")}, timeout=45))
+        except DigestError:
+            raise
+        except Exception:
+            raise DigestError("Slack could not be reached; check connectivity and try again.") from None
         if not response.ok:
             raise DigestError("Slack history request failed or was rate limited; retry later.")
         data = response.json()
@@ -445,6 +474,7 @@ ALERT_NEXT = {
     "stale": "The tracker changed during the run. Safe to re-run.",
     "delivery": "Delivery to leadership is uncertain. Check the leadership channel and Power Automate run history BEFORE clearing today's Digest State row.",
     "unexpected": "Unexpected failure. Check the Actions run.",
+    "notice": "Heads-up only: today's digest ran normally.",
 }
 
 
@@ -456,7 +486,8 @@ def send_alert(kind, message, detail=None):
         import requests
         server, repo, run_id = (os.getenv(k, "") for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
         link = f"{server}/{repo}/actions/runs/{run_id}" if server and repo and run_id else None
-        title = "Leave digest delivery needs review" if kind == "delivery" else "Leave digest NOT sent"
+        title = {"delivery": "Leave digest delivery needs review",
+                 "notice": "Leave digest heads-up"}.get(kind, "Leave digest NOT sent")
         text = f"{message}\n\n{detail}\n\n{ALERT_NEXT[kind]}" if detail else f"{message}\n\n{ALERT_NEXT[kind]}"
         card = build_card(title, "attention", text, link)
         response = requests.post(webhook_url("ALERT_WEBHOOK_URL"), json=card, timeout=15, allow_redirects=False)
@@ -491,7 +522,9 @@ def run():
     if mode == "live":
         # Fail before touching the sheet if the leadership/alert targets are unsafe or missing.
         webhook = webhook_url("TEAMS_WEBHOOK_URL")
-        webhook_url("ALERT_WEBHOOK_URL")
+        if webhook_url("ALERT_WEBHOOK_URL") == webhook:
+            print("WARNING: ALERT_WEBHOOK_URL equals TEAMS_WEBHOOK_URL; failure alerts, which name employees, "
+                  "go to the same channel as the digest. Use a private owners' channel for alerts.")
         required("SLACK_LEAVE_BOT_ID")
     days = int(os.getenv("UPCOMING_DAYS", "0"))
     if not 0 <= days <= 90:
@@ -518,6 +551,14 @@ def run():
         months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
     this_month = months[0]
+    missing = (set(n for n in map(normalized, mapping.values())) | set(hidden)) - set(this_month.people)
+    if missing:  # Count only. A typo here would show a Shadow person in the digest or drop leave writes.
+        print(f"{len(missing)} Employee Mapping name(s) were not found in the {this_month.title} calendar "
+              f"({len(missing & set(hidden))} marked Shadow); check spelling against the calendar.")
+    next_title = (today.replace(day=28) + timedelta(days=4)).replace(day=1).strftime("%B %Y")
+    if mode == "live" and today.day >= 24 and next_title not in sheets.titles:
+        send_alert("notice", f"Next month's tab '{next_title}' does not exist yet. Create it before the first "
+                             "working day of the month, or that day's digest will fail.")
     if os.getenv("SKIP_HOLIDAYS", "true").lower() == "true":
         codes = [this_month.code(r, today) for r in this_month.people.values()]
         if codes and all(c == "HL" for c in codes):
