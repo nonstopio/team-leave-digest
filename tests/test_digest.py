@@ -151,6 +151,8 @@ class DigestTests(unittest.TestCase):
         with self.assertRaises(DigestError) as ctx:
             parse_request({'bot_id': 'B1', 'ts': '1760500000.1', 'user': 'U9', 'text': '<@U123> applied a Unplanned reason: private'})
         self.assertEqual(ctx.exception.detail, 'Slack message ts 1760500000.1, user U9')
+        self.assertIn('1760500000.1', str(ctx.exception))  # ts helps find the message; it is not sensitive
+        self.assertNotIn('U9', str(ctx.exception))
         self.assertNotIn('private', ctx.exception.detail)
 
     def test_weekend_cells_are_not_written(self):
