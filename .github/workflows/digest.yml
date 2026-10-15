@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Preview validates; setup-mapping creates the mapping tab; live updates and posts
+        description: Preview validates only; live updates the sheet and posts
         type: choice
-        options: [preview, setup-mapping, live]
+        options: [preview, live]
         default: preview
   schedule:
     # 06:37 UTC = 12:07 IST. GitHub may delay scheduled runs.
