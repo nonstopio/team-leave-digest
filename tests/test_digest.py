@@ -161,12 +161,17 @@ class DigestTests(unittest.TestCase):
                 parse_request(msg(text), today)
         with self.assertRaises(DigestError):
             parse_request(msg('<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-09-25.'))
-        # impossible dates are ignored when deciding; a real future date still blocks
+        # impossible dates fail closed, even if the other date is past
         with self.assertRaises(DigestError):
-            parse_request(msg('<@U1> applied a Unplanned - WFH 2026-13-45 to 2027-01-02.'), today)
-        # reversed range that ended in the past is skipped; matched format but invalid date too
+            parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-09-31 to 2026-09-24. Full Day'), today)
+        # a stray past date elsewhere must not hide a leave in another date format
+        with self.assertRaises(DigestError):
+            parse_request(msg('<@U1> applied a Unplanned - WFH on 2026-09-24 from 24/10/2026 to 26/10/2026.'), today)
+        # two ranges in one message are ambiguous: fail closed
+        with self.assertRaises(DigestError):
+            parse_request(msg('<@U1> applied a Unplanned - WFH from 2026-09-24 to 2026-09-25 and from 2026-10-20 to 2026-10-21.'), today)
+        # reversed range that ended in the past is skipped
         self.assertIsNone(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-09-26 to 2026-09-24. Full Day'), today))
-        self.assertIsNone(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-09-31 to 2026-09-24. Full Day'), today))
         # a valid current request is unaffected
         self.assertEqual(parse_request(msg('<@U1> applied a Unplanned - Sick/Emergency Leave from 2026-10-15 to 2026-10-16. Half Day'), today).code, 'HD')
 

@@ -96,15 +96,20 @@ REQUEST = re.compile(
 )
 
 
+RANGE = re.compile(r"\bfrom\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})\b", re.I)
+
+
 def ended(text, today):
-    """True only if the text names at least one date and every date is before today."""
-    days = []
-    for raw in re.findall(r"\d{4}-\d{2}-\d{2}", text):
-        try:
-            days.append(date.fromisoformat(raw))
-        except ValueError:
-            pass
-    return bool(days) and today is not None and max(days) < today
+    """True only if the text has exactly one 'from <date> to <date>' clause, both dates are
+    valid, and both are before today. Any other date in the text is deliberately ignored, so a
+    stray past date (e.g. 'applied on ...') can never hide a current leave."""
+    ranges = RANGE.findall(text)
+    if today is None or len(ranges) != 1:
+        return False
+    try:
+        return max(date.fromisoformat(d) for d in ranges[0]) < today
+    except ValueError:
+        return False
 
 
 def parse_request(message, today=None):
