@@ -529,7 +529,14 @@ def run():
     days = int(os.getenv("UPCOMING_DAYS", "0"))
     if not 0 <= days <= 90:
         raise DigestError("UPCOMING_DAYS must be 0 (month end) or 1–90.")
-    last_day = today + timedelta(days=days) if days else today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    min_days = int(os.getenv("UPCOMING_MIN_DAYS", "14"))
+    if not 0 <= min_days <= 90:
+        raise DigestError("UPCOMING_MIN_DAYS must be between 0 and 90.")
+    # Default window: through month end, but at least min_days ahead. Months after the current one are
+    # optional then: if their tab is missing or invalid we fall back to month end instead of failing.
+    last_day = today + timedelta(days=days) if days else max(month_end, today + timedelta(days=min_days))
+    fell_back = False
     sheets = Sheets()
     mapping_rows = sheets.read("Employee Mapping", "A1:Z5000")
     mapping, hidden, teams = employee_mapping(mapping_rows), shadow_names(mapping_rows), team_labels(mapping_rows)
@@ -539,16 +546,28 @@ def run():
         raise DigestError("CALENDAR_MAX_ROWS must be 2–5000.")
     while current <= last_day:
         title = current.strftime("%B %Y")
-        rows = sheets.read(title, f"A1:AZ{max_rows}")
-        originals[title] = json.loads(json.dumps(rows))
-        if len(rows) >= max_rows:
-            raise DigestError("Calendar row limit reached; increase CALENDAR_MAX_ROWS.")
-        headers = [normalized(x) for x in rows[0]] if rows else []
-        name_col = headers.index("name") if "name" in headers else None
-        evaluated = None
-        if name_col is not None and any(str(cell(row, name_col)).startswith("=") for row in rows[1:]):
-            evaluated = sheets.read(title, f"A1:AZ{max_rows}", render="UNFORMATTED_VALUE")
-        months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
+        optional = not days and current > today.replace(day=1)
+        try:
+            rows = sheets.read(title, f"A1:AZ{max_rows}")
+            originals[title] = json.loads(json.dumps(rows))
+            if len(rows) >= max_rows:
+                raise DigestError("Calendar row limit reached; increase CALENDAR_MAX_ROWS.")
+            headers = [normalized(x) for x in rows[0]] if rows else []
+            name_col = headers.index("name") if "name" in headers else None
+            evaluated = None
+            if name_col is not None and any(str(cell(row, name_col)).startswith("=") for row in rows[1:]):
+                evaluated = sheets.read(title, f"A1:AZ{max_rows}", render="UNFORMATTED_VALUE")
+            months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
+        except DigestError as exc:
+            if not optional:
+                raise
+            originals.pop(title, None)
+            last_day, fell_back = current - timedelta(days=1), True
+            note = (f"The '{title}' calendar could not be used ({exc}) so this digest only covers through "
+                    f"{last_day:%d %b}. Create or fix the tab.")
+            print(note)
+            send_alert("notice", note)
+            break
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
     this_month = months[0]
     missing = (set(n for n in map(normalized, mapping.values())) | set(hidden)) - set(this_month.people)
@@ -556,7 +575,7 @@ def run():
         print(f"{len(missing)} Employee Mapping name(s) were not found in the {this_month.title} calendar "
               f"({len(missing & set(hidden))} marked Shadow); check spelling against the calendar.")
     next_title = (today.replace(day=28) + timedelta(days=4)).replace(day=1).strftime("%B %Y")
-    if mode == "live" and today.day >= 24 and next_title not in sheets.titles:
+    if mode == "live" and not fell_back and today.day >= 24 and next_title not in sheets.titles:
         send_alert("notice", f"Next month's tab '{next_title}' does not exist yet. Create it before the first "
                              "working day of the month, or that day's digest will fail.")
     if os.getenv("SKIP_HOLIDAYS", "true").lower() == "true":

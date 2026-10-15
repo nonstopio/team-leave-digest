@@ -1,3 +1,4 @@
+import calendar
 import unittest
 import copy
 import os
@@ -13,6 +14,12 @@ def month(name_col=2):
     start = date(2026, 10, 1)
     headers = [''] * name_col + ['Name'] + [(start + timedelta(days=i) - date(1899, 12, 30)).days for i in range(31)]
     return Month('October 2026', [headers, [''] * name_col + ['Sample Employee'] + [''] * 31], 2026, 10)
+
+
+def cal_rows(year, month_no, name_col=2):
+    first, days = date(year, month_no, 1), calendar.monthrange(year, month_no)[1]
+    headers = [''] * name_col + ['Name'] + [(first + timedelta(days=i) - date(1899, 12, 30)).days for i in range(days)]
+    return [headers, [''] * name_col + ['Sample Employee'] + [''] * days]
 
 
 class DigestTests(unittest.TestCase):
@@ -269,15 +276,25 @@ class DigestTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False, leaves=None, post_error=None,
-                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026')):
+                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026'), nov_edit=None):
         rows = month().rows
         sheets = Mock()
         sheets.titles = set(titles) | {'Employee Mapping', 'Digest State'}
         mapping_rows = mapping_extra or [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
-        mapping_reads = []
+        mapping_reads, reads = [], []
+        sheets.reads = reads
+
+        nov_rows = cal_rows(2026, 11)
+        if nov_edit:
+            nov_edit(nov_rows)
 
         def read(title, area, render='FORMULA'):
+            reads.append(title)
+            if title == 'November 2026' and title in sheets.titles:
+                return copy.deepcopy(nov_rows)
             if title != 'Employee Mapping':
+                if title not in sheets.titles:
+                    raise DigestError('A required sheet tab is missing.')
                 return copy.deepcopy(rows)
             mapping_reads.append(1)
             later = mapping_later is not None and len(mapping_reads) > 1
@@ -433,19 +450,64 @@ class MainTests(unittest.TestCase):
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
 
-    def test_missing_next_month_tab_sends_a_heads_up_but_still_posts(self):
+    def test_window_stays_at_month_end_mid_month_and_reaches_next_month_late(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 15))  # 15 + 14 = Oct 29: still inside October
+        self.assertNotIn('November 2026', sheets.reads)
+        def nov_leave(rows):
+            rows[1][[i for i, v in enumerate(rows[0]) if v == (date(2026, 11, 2) - date(1899, 12, 30)).days][0]] = 'PL'
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), nov_edit=nov_leave)  # 26 + 14 = Nov 9
+        self.assertIsNone(error)
+        self.assertIn('November 2026', sheets.reads)
+        self.assertIn('1. Sample Employee: 2nd Nov', str(post.call_args_list[-1].kwargs['json']))
+
+    def test_min_days_zero_keeps_month_end_only(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), env_extra={'UPCOMING_MIN_DAYS': '0'})
+        self.assertNotIn('November 2026', sheets.reads)
+
+    def test_min_days_is_validated(self):
+        sheets, post, error = self.run_job('live', env_extra={'UPCOMING_MIN_DAYS': '91'})
+        self.assertIn('UPCOMING_MIN_DAYS', str(error))
+
+    def test_missing_or_invalid_next_month_falls_back_with_a_heads_up(self):
         sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',))
         self.assertIsNone(error)
         self.assertEqual(self.posted(post), ['alert', 'leadership'])
         alert = str(post.call_args_list[0].kwargs['json'])
         self.assertIn('heads-up', alert)
-        self.assertIn("'November 2026' does not exist", alert)
+        self.assertIn("'November 2026' calendar could not be used", alert)
+        self.assertIn('only covers through 31 Oct', alert)
         self.assertNotIn('NOT sent', alert)
+        # a tab that exists but is broken falls back the same way
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26),
+                                           nov_edit=lambda rows: rows.__setitem__(0, ['Name']))
+        self.assertIsNone(error)
+        self.assertEqual(self.posted(post), ['alert', 'leadership'])
 
-    def test_no_heads_up_early_in_month_or_when_tab_exists(self):
+    def test_explicit_upcoming_days_still_requires_the_next_tab(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',),
+                                           env_extra={'UPCOMING_DAYS': '14'})
+        self.assertIsInstance(error, DigestError)
+        sheets.write.assert_not_called()
+        self.assertIn('NOT sent', str(post.call_args_list[0].kwargs['json']))
+
+    def test_leave_spanning_month_end_is_written_into_both_tabs(self):
+        leave = Leave('U123', date(2026, 10, 30), date(2026, 11, 3), 'SL')
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), leaves=[leave])
+        self.assertIsNone(error)
+        ranges = [w['range'] for w in sheets.write.call_args.args[0]]
+        self.assertEqual(sorted(r.split('!')[0] for r in ranges),
+                         ["'November 2026'", "'November 2026'", "'October 2026'"])  # Oct 30, Nov 2, Nov 3 (weekends skipped)
+
+    def test_heads_up_not_sent_early_in_month_or_when_tab_exists(self):
         for kwargs in ({'now': date(2026, 10, 15), 'titles': ('October 2026',)}, {'now': date(2026, 10, 26)}):
             sheets, post, error = self.run_job('live', **kwargs)
             self.assertEqual(self.posted(post), ['leadership'])
+
+    def test_heads_up_when_window_is_month_end_only_and_tab_missing_late_in_month(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',),
+                                           env_extra={'UPCOMING_MIN_DAYS': '0'})
+        self.assertEqual(self.posted(post), ['alert', 'leadership'])
+        self.assertIn("'November 2026' does not exist", str(post.call_args_list[0].kwargs['json']))
 
     def test_mapping_names_missing_from_calendar_are_counted_not_named(self):
         mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V1'],

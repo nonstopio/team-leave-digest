@@ -36,6 +36,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `ENABLE_SCHEDULE` | unset | Set to `true` only after preview and a successful live test |
    | `TIMEZONE` | `Asia/Kolkata` | Timezone for dates; changing this does not change cron |
    | `UPCOMING_DAYS` | `0` | 0 = rest of month; 1–90 = rolling calendar days, loading subsequent monthly tabs |
+   | `UPCOMING_MIN_DAYS` | `14` | With `UPCOMING_DAYS=0`, the window runs to month end or this many days ahead, whichever is later, so the last days of a month still show next month's leaves. If next month's tab is missing or invalid, the digest falls back to month end and the alert channel gets a heads-up. `0` keeps month end only. Ignored when `UPCOMING_DAYS` is set. |
    | `SKIP_WEEKENDS` | `true` | Skip Saturday and Sunday |
    | `SKIP_HOLIDAYS` | `true` | Skip if all employee rows have `HL` today |
    | `SLACK_LOOKBACK_DAYS` | `90` | Read requests posted in the last 90 days, including multi-day requests still active |

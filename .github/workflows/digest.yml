@@ -45,6 +45,7 @@ jobs:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
           UPCOMING_DAYS: ${{ vars.UPCOMING_DAYS || '0' }}
+          UPCOMING_MIN_DAYS: ${{ vars.UPCOMING_MIN_DAYS || '14' }}
           SKIP_WEEKENDS: ${{ vars.SKIP_WEEKENDS || 'true' }}
           SKIP_HOLIDAYS: ${{ vars.SKIP_HOLIDAYS || 'true' }}
           SLACK_LOOKBACK_DAYS: ${{ vars.SLACK_LOOKBACK_DAYS || '90' }}
