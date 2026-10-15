@@ -89,22 +89,25 @@ def employee_mapping(rows):
     mapping, names = {}, set()
     for row in rows[1:]:
         user, name = str(cell(row, 0)).strip(), str(cell(row, 1)).strip()
+        if name:  # Blank-ID placeholders count too: a duplicate could hide or swap a real employee.
+            if normalized(name) in names:
+                raise DigestError("Employee Mapping contains duplicate IDs or tracker names.")
+            names.add(normalized(name))
         if not user:
             continue  # Prefilled roster names can be mapped gradually.
         if not re.fullmatch(r"[UW][A-Z0-9]+", user) or not name or name.startswith("="):
             raise DigestError("Employee Mapping contains an invalid ID or missing/invalid tracker name.")
-        if user in mapping or normalized(name) in names:
+        if user in mapping:
             raise DigestError("Employee Mapping contains duplicate IDs or tracker names.")
         mapping[user] = name
-        names.add(normalized(name))
     return mapping
 
 
 def shadow_names(rows):
     """Normalized tracker names whose Role (found by its header) contains 'shadow'; they stay out of the digest."""
     headers = [normalized(x) for x in rows[0]] if rows else []
-    if "role" not in headers:
-        return frozenset()
+    if "role" not in headers:  # Fail closed: without it Shadow people would silently appear in the digest.
+        raise DigestError("Employee Mapping needs a Role column (header 'Role') so Shadow roles can be hidden.")
     role_col = headers.index("role")
     return frozenset(normalized(cell(row, 1)) for row in rows[1:]
                      if cell(row, 1) and "shadow" in str(cell(row, role_col)).casefold())
@@ -194,7 +197,10 @@ class Month:
         self.dates = {}
         for c, value in enumerate(rows[0]):
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                d = date(1899, 12, 30) + timedelta(days=int(value))
+                try:
+                    d = date(1899, 12, 30) + timedelta(days=int(value))
+                except (OverflowError, ValueError):
+                    raise DigestError("Calendar date headers are missing or not real spreadsheet dates.") from None
                 if (d.year, d.month) == (year, month):
                     if d in self.dates:
                         raise DigestError("Duplicate calendar date headers.")
@@ -239,7 +245,7 @@ class Month:
             # A full-day SL already covers a half-day request for the same day.
             if old in ("WK", "HL") or old == leave.code or (old == "SL" and leave.code == "HD"):
                 continue
-            if old:
+            if old and not (old == "HD" and leave.code == "SL"):  # a later full-day request upgrades a half day
                 raise DigestError("Leave conflicts with an existing calendar entry; resolve it privately before retrying.",
                                   "conflict", f"{name}, {day:%d %b %Y}: tracker has {old}, Slack requested {leave.code}")
             c = self.dates[day]
@@ -288,7 +294,7 @@ def make_digest(months, today, last_day, hidden=frozenset(), teams=None):
         for name, r in month.people.items():
             if name in hidden:
                 continue
-            display = str(cell(month.rows[r], month.name_col)).strip()
+            display = " ".join(str(cell(month.rows[r], month.name_col)).split())  # a stray newline must not split the card
             if (teams or {}).get(name):
                 display = f"{display} ({teams[name]})"
             for day in month.dates:
@@ -305,7 +311,9 @@ def make_digest(months, today, last_day, hidden=frozenset(), teams=None):
                         sections["Planned Leaves"].append(f"{display}: {ordinal(day.day)} {day:%b}")
                     elif code and code not in KNOWN_CODES:
                         # Never drop an entry leadership might need; show it unclassified.
-                        sections["Other Entries"].append(f"{display}: {code} (unrecognized code)")
+                        # Show only a short code; free text in a cell (e.g. a private note) must not reach leadership.
+                        shown = code if re.fullmatch(r"[A-Z]{1,6}", code) else "unrecognized entry"
+                        sections["Other Entries"].append(f"{display}: {shown} (unrecognized code)")
                 if today < day <= last_day and code == "PL":
                     planned.setdefault(display, []).append(day)
     sections["Upcoming Holidays"] = [f"{d:%A, %B} {d.day}, {d.year}" for d in sorted(holidays)]
@@ -337,9 +345,9 @@ class Sheets:
         try:
             response = retrying(lambda: self.http.request(method, self.base + path, timeout=45, **kwargs))
         except Exception:
-            raise DigestError("Google Sheets API could not be reached; check connectivity and try again.") from None
+            raise DigestError("Google Sheets API could not be reached; check connectivity and try again.", "sheets") from None
         if not response.ok:
-            raise DigestError("Google Sheets API failed; check sharing, credentials, and calendar configuration.")
+            raise DigestError("Google Sheets API failed; check sharing, credentials, and calendar configuration.", "sheets")
         return response.json()
 
     def read(self, title, area, render="FORMULA"):
@@ -400,6 +408,10 @@ def slack_requests(today, last_day):
         for message in data.get("messages", []):
             source = os.getenv("SLACK_LEAVE_BOT_ID", "")
             if source and message.get("bot_id") != source:
+                if message.get("bot_id") and REQUEST.search(message.get("text", "").replace("*", "")):
+                    raise DigestError("A leave request came from an unexpected bot; check SLACK_LEAVE_BOT_ID "
+                                      "(the workflow app may have been reinstalled).", "config",
+                                      f"Slack message ts {message.get('ts', '?')}, bot {message.get('bot_id')}")
                 continue
             leave = parse_request(message, today)
             if leave is None and message.get("bot_id"):
@@ -471,16 +483,19 @@ def digest_card(text):
 ALERT_NEXT = {
     "conflict": "Needs a manual data fix in Slack or the tracker; then re-run.",
     "config": "Fix the configuration or access problem; then re-run.",
+    "sheets": "Google Sheets was unreachable or refused access. Check sharing and credentials, then re-run.",
     "stale": "The tracker changed during the run. Safe to re-run.",
     "delivery": "Delivery to leadership is uncertain. Check the leadership channel and Power Automate run history BEFORE clearing today's Digest State row.",
     "unexpected": "Unexpected failure. Check the Actions run.",
     "notice": "Heads-up only: today's digest ran normally.",
+    "missing": "Check the Actions run history. If today's run did not start or failed, fix the cause and run live manually, "
+               "but first check the leadership channel in case it was delivered.",
 }
 
 
 def send_alert(kind, message, detail=None):
     """Tell the owners' channel the digest was not sent. Never raises; never masks the real error."""
-    if os.getenv("RUN_MODE") != "live":
+    if os.getenv("RUN_MODE") not in ("live", "verify"):
         return
     try:
         import requests
@@ -488,12 +503,15 @@ def send_alert(kind, message, detail=None):
         link = f"{server}/{repo}/actions/runs/{run_id}" if server and repo and run_id else None
         title = {"delivery": "Leave digest delivery needs review",
                  "notice": "Leave digest heads-up"}.get(kind, "Leave digest NOT sent")
+        target = webhook_url("ALERT_WEBHOOK_URL")
+        if target == os.getenv("TEAMS_WEBHOOK_URL"):
+            detail = None  # same channel as the digest: never put employee details there
         text = f"{message}\n\n{detail}\n\n{ALERT_NEXT[kind]}" if detail else f"{message}\n\n{ALERT_NEXT[kind]}"
         card = build_card(title, "attention", text, link)
-        response = requests.post(webhook_url("ALERT_WEBHOOK_URL"), json=card, timeout=15, allow_redirects=False)
+        response = requests.post(target, json=card, timeout=15, allow_redirects=False)
         if not 200 <= response.status_code < 300:
             raise ValueError
-        if os.getenv("GITHUB_OUTPUT"):
+        if kind != "notice" and os.getenv("GITHUB_OUTPUT"):  # a heads-up must not silence the early-failure backstop
             with open(os.environ["GITHUB_OUTPUT"], "a") as out:
                 out.write("alerted=true\n")
     except Exception:
@@ -513,12 +531,14 @@ def skipped(reason):
 
 def run():
     mode = os.getenv("RUN_MODE", "preview")
-    if mode not in ("preview", "live"):
-        raise DigestError("RUN_MODE must be preview or live.")
+    if mode not in ("preview", "live", "verify"):
+        raise DigestError("RUN_MODE must be preview, live or verify.")
     today = datetime.now(ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))).date()
     if os.getenv("SKIP_WEEKENDS", "true").lower() == "true" and today.weekday() >= 5:
         skipped("today is a weekend (SKIP_WEEKENDS is on)")
         return
+    if mode == "verify":
+        webhook_url("ALERT_WEBHOOK_URL")  # read-only check; it can only alert the owners
     if mode == "live":
         # Fail before touching the sheet if the leadership/alert targets are unsafe or missing.
         webhook = webhook_url("TEAMS_WEBHOOK_URL")
@@ -559,7 +579,7 @@ def run():
                 evaluated = sheets.read(title, f"A1:AZ{max_rows}", render="UNFORMATTED_VALUE")
             months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
         except DigestError as exc:
-            if not optional:
+            if not optional or exc.kind == "sheets":  # only a tab problem may truncate the window, never an outage
                 raise
             originals.pop(title, None)
             last_day, fell_back = current - timedelta(days=1), True
@@ -584,6 +604,13 @@ def run():
             skipped("today is a company holiday (every roster row is HL)")
             return
     status, state_row = sheets.state(today)
+    if mode == "verify":
+        # Dead-man check: the 11:30 run may never have started (GitHub drops or disables schedules).
+        if status == "accepted":
+            print("Verified: today's digest was accepted by Teams.")
+            return
+        raise DigestError("No accepted digest is recorded for today. The scheduled run may not have started, "
+                          "or it failed or is still running.", "missing")
     if mode == "live" and status == "accepted":
         skipped("today's digest was already sent. To send it again, delete today's row in the "
                 "Digest State tab and run live again")
@@ -631,13 +658,17 @@ def run():
     sheets.claim(today, state_row, "pending")
     try:
         response = requests.post(webhook, json=card, timeout=45, allow_redirects=False)
-        if response.status_code == 429 or response.status_code >= 500:
-            time.sleep(5)  # one retry for a transient rejection; nothing was accepted, so no duplicate risk
+        if response.status_code == 429:
+            time.sleep(5)  # rate-limited means nothing was accepted, so one retry cannot duplicate
             response = requests.post(webhook, json=card, timeout=45, allow_redirects=False)
     except requests.RequestException:
         # Ambiguous: the message may have arrived. State stays pending to block an automatic duplicate.
         raise DigestError("Teams delivery outcome is unknown; verify delivery privately before clearing pending state.",
                           "delivery") from None
+    if response.status_code >= 500:
+        # A gateway error can arrive after the flow already ran, so it is ambiguous like a timeout: stay pending.
+        raise DigestError("Teams returned a server error and may or may not have delivered; verify delivery "
+                          "privately before clearing pending state.", "delivery")
     if not 200 <= response.status_code < 300:
         # Definite rejection: nothing was posted. 'failed' lets a manual same-day live re-run retry.
         try:

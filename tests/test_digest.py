@@ -163,8 +163,8 @@ class DigestTests(unittest.TestCase):
                 ['', 'Placeholder Person', 'shadow developer', 'V1'], ['U2', 'Other Person', 'Backend', 'V1'],
                 ['U3', 'Lead Person', 'Lead', 'V1']]
         self.assertEqual(shadow_names(rows), {'sample employee', 'placeholder person'})
-        self.assertEqual(shadow_names([['Slack User ID', 'Tracker Name']]), frozenset())  # no Role column: nothing hidden
-        self.assertEqual(shadow_names([]), frozenset())
+        with self.assertRaises(DigestError):  # no Role column: fail closed rather than expose Shadow people
+            shadow_names([['Slack User ID', 'Tracker Name']])
         self.assertEqual(digest.employee_mapping(rows), {'U1': 'Sample Employee', 'U2': 'Other Person', 'U3': 'Lead Person'})
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.dates[today]] = 'SL'
@@ -182,6 +182,43 @@ class DigestTests(unittest.TestCase):
         self.assertIn('Sample Employee (INT): Sick/Emergency leave', text)
         self.assertIn('Sample Employee (INT): 19th Oct', text)
         self.assertIn('Sample Employee: Sick/Emergency leave', make_digest([m], today, today))  # no Team column: unchanged
+
+    def test_placeholder_duplicate_cannot_hide_a_real_employee(self):
+        rows = [['Slack User ID', 'Tracker Name', 'Role'], ['U1', 'Sample Employee', 'QA'], ['', 'sample  employee', 'Shadow QA']]
+        with self.assertRaises(DigestError):
+            digest.employee_mapping(rows)
+
+    def test_full_day_request_upgrades_an_existing_half_day(self):
+        m, today = month(), date(2026, 10, 15)
+        m.rows[1][m.dates[today]] = 'HD'
+        writes = m.plan(Leave('U123', today, today, 'SL'), 'Sample Employee', today, today)
+        self.assertEqual([w['values'] for w in writes], [[['SL']]])
+        m.rows[1][m.dates[today]] = 'PL'
+        with self.assertRaises(DigestError):  # a planned leave is still a conflict
+            m.plan(Leave('U123', today, today, 'SL'), 'Sample Employee', today, today)
+
+    def test_free_text_in_a_cell_never_reaches_leadership(self):
+        m, today = month(), date(2026, 10, 15)
+        m.rows[1][m.dates[today]] = 'Sick - doctor appt, private'
+        text = make_digest([m], today, today)
+        self.assertIn('Other Entries', text)
+        self.assertNotIn('doctor', text)
+        self.assertIn('Sample Employee: unrecognized entry (unrecognized code)', text)
+        m.rows[1][m.dates[today]] = 'ml'
+        self.assertIn('Sample Employee: ML (unrecognized code)', make_digest([m], today, today))
+
+    def test_newline_in_a_name_stays_on_one_line(self):
+        m, today = month(), date(2026, 10, 15)
+        m.rows[1][m.name_col] = 'Ann\n\nSmith'
+        m.rows[1][m.dates[today]] = 'SL'
+        m = Month(m.title, m.rows, 2026, 10)
+        self.assertIn('1. Ann Smith: Sick/Emergency leave', make_digest([m], today, today))
+
+    def test_absurd_date_header_is_a_clean_error(self):
+        rows = month().rows
+        rows[0][-1] = 99999999999
+        with self.assertRaises(DigestError):
+            Month('October 2026', rows, 2026, 10)
 
     def test_alert_card_has_attention_header_and_run_link(self):
         card = build_card('Leave digest NOT sent', 'attention', 'Fix it.', 'https://example.invalid/run/1')
@@ -276,11 +313,11 @@ class DigestTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False, leaves=None, post_error=None,
-                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026'), nov_edit=None):
+                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026'), nov_edit=None, nov_outage=False):
         rows = month().rows
         sheets = Mock()
         sheets.titles = set(titles) | {'Employee Mapping', 'Digest State'}
-        mapping_rows = mapping_extra or [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
+        mapping_rows = mapping_extra or [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', '']]
         mapping_reads, reads = [], []
         sheets.reads = reads
 
@@ -290,6 +327,8 @@ class MainTests(unittest.TestCase):
 
         def read(title, area, render='FORMULA'):
             reads.append(title)
+            if title == 'November 2026' and nov_outage:
+                raise DigestError('Google Sheets API failed', 'sheets')
             if title == 'November 2026' and title in sheets.titles:
                 return copy.deepcopy(nov_rows)
             if title != 'Employee Mapping':
@@ -367,17 +406,24 @@ class MainTests(unittest.TestCase):
         self.assertEqual([c.args[-1] for c in sheets.claim.call_args_list], ['pending', 'failed'])
         self.assertEqual(self.posted(post), ['leadership', 'alert'])
 
-    def test_transient_5xx_is_retried_once_without_failing(self):
-        sheets, post, error = self.run_job('live', post_statuses=[503, 202])
+    def test_rate_limit_is_retried_once_without_failing(self):
+        sheets, post, error = self.run_job('live', post_statuses=[429, 202])
         self.assertIsNone(error)
         self.assertEqual(self.posted(post), ['leadership', 'leadership'])
         self.assertEqual(sheets.claim.call_args_list[-1].args[-1], 'accepted')
 
-    def test_persistent_5xx_marks_failed_after_one_retry(self):
-        sheets, post, error = self.run_job('live', post_statuses=[500, 500])
-        self.assertIsNotNone(error)
+    def test_persistent_rate_limit_marks_failed_after_one_retry(self):
+        sheets, post, error = self.run_job('live', post_statuses=[429, 429])
+        self.assertEqual(error.kind, 'config')
         self.assertEqual(self.posted(post), ['leadership', 'leadership', 'alert'])
         self.assertEqual(sheets.claim.call_args_list[-1].args[-1], 'failed')
+
+    def test_gateway_error_is_ambiguous_never_retried_never_failed(self):
+        for code in (500, 502, 503, 504):
+            sheets, post, error = self.run_job('live', post_status=code)
+            self.assertEqual(error.kind, 'delivery')
+            self.assertEqual(self.posted(post), ['leadership', 'alert'])  # no second post: it may have been delivered
+            self.assertEqual([c.args[-1] for c in sheets.claim.call_args_list], ['pending'])  # stays pending
 
     def test_failed_state_write_after_rejection_alerts_as_delivery(self):
         sheets, post, error = self.run_job('live', post_status=400, claim_error_on='failed')
@@ -436,8 +482,8 @@ class MainTests(unittest.TestCase):
         self.assertIn('1. Sample Employee (INT): Sick/Emergency leave', str(post.call_args_list[0].kwargs['json']))
 
     def test_team_change_during_run_is_treated_as_stale(self):
-        first = [['Slack User ID', 'Tracker Name', 'Team'], ['U123', 'Sample Employee', 'V1']]
-        later = [['Slack User ID', 'Tracker Name', 'Team'], ['U123', 'Sample Employee', 'V2']]
+        first = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V1']]
+        later = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V2']]
         sheets, post, error = self.run_job('live', mapping_extra=first, mapping_later=later)
         self.assertEqual(error.kind, 'stale')
         sheets.write.assert_not_called()
@@ -482,6 +528,68 @@ class MainTests(unittest.TestCase):
                                            nov_edit=lambda rows: rows.__setitem__(0, ['Name']))
         self.assertIsNone(error)
         self.assertEqual(self.posted(post), ['alert', 'leadership'])
+
+    def test_sheets_outage_never_silently_truncates_the_window(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), nov_outage=True)
+        self.assertEqual(error.kind, 'sheets')
+        sheets.write.assert_not_called()
+        self.assertEqual(self.posted(post), ['alert'])  # no leadership post of a half-built digest
+        self.assertIn('NOT sent', str(post.call_args.kwargs['json']))
+
+    def test_heads_up_does_not_disable_the_early_failure_backstop(self):
+        out = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'gh_output_notice')
+        open(out, 'w').close()
+        self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',), env_extra={'GITHUB_OUTPUT': out})
+        with open(out) as f:
+            self.assertEqual(f.read(), '')  # a notice alert must not write alerted=true
+        self.run_job('live', rows_edit=self.pl_today, env_extra={'GITHUB_OUTPUT': out})
+        with open(out) as f:
+            self.assertEqual(f.read(), 'alerted=true\n')  # a real failure alert does
+        os.remove(out)
+
+    def test_alert_details_are_dropped_when_alert_channel_is_the_leadership_channel(self):
+        same = 'https://example.invalid/leadership'
+        sheets, post, error = self.run_job('live', rows_edit=self.pl_today, env_extra={'ALERT_WEBHOOK_URL': same})
+        body = str(post.call_args.kwargs['json'])
+        self.assertIn('NOT sent', body)
+        self.assertNotIn('tracker has PL', body)
+        self.assertNotIn('Sample Employee', body)
+
+    def test_verify_is_quiet_when_todays_digest_was_accepted(self):
+        sheets, post, error = self.run_job('verify', status='accepted')
+        self.assertIsNone(error)
+        post.assert_not_called()
+        sheets.write.assert_not_called()
+        sheets.claim.assert_not_called()
+
+    def test_verify_alerts_the_owners_only_when_no_accepted_digest_exists(self):
+        for status in (None, 'pending', 'failed'):
+            sheets, post, error = self.run_job('verify', status=status)
+            self.assertEqual(error.kind, 'missing')
+            self.assertEqual(self.posted(post), ['alert'])  # never the leadership channel
+            sheets.write.assert_not_called()
+            sheets.claim.assert_not_called()
+            self.assertIn('NOT sent', str(post.call_args.kwargs['json']))
+
+    def test_verify_skips_weekends_and_holidays_quietly(self):
+        sheets, post, error = self.run_job('verify', now=date(2026, 10, 17))
+        self.assertIsNone(error)
+        post.assert_not_called()
+        holiday = lambda rows: rows[1].__setitem__(
+            [i for i, v in enumerate(rows[0]) if v == (date(2026, 10, 15) - date(1899, 12, 30)).days][0], 'HL')
+        sheets, post, error = self.run_job('verify', rows_edit=holiday)
+        self.assertIsNone(error)
+        post.assert_not_called()
+
+    def test_verify_needs_only_the_alert_url(self):
+        with patch.object(digest, 'Sheets') as sheets_cls:
+            env = {'RUN_MODE': 'verify'}
+            clock = Mock()
+            clock.now.return_value.date.return_value = date(2026, 10, 15)
+            with patch.dict(os.environ, env, clear=True), patch.object(digest, 'datetime', clock), \
+                 self.assertRaises(DigestError):
+                digest.run()
+            sheets_cls.assert_not_called()
 
     def test_explicit_upcoming_days_still_requires_the_next_tab(self):
         sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',),
@@ -668,8 +776,17 @@ class SlackAndStateTests(unittest.TestCase):
             return digest.slack_requests(date(2026, 10, 15), date(2026, 10, 31))
 
     def test_only_the_configured_bot_is_trusted(self):
-        page = {'ok': True, 'messages': [{'bot_id': 'BOTHER', 'text': self.TEXT}, {'bot_id': 'BSOURCE', 'text': self.TEXT}]}
+        other = {'bot_id': 'BOTHER', 'text': 'Is the leave approved? Approved'}  # a different workflow: ignored
+        page = {'ok': True, 'messages': [other, {'bot_id': 'BSOURCE', 'text': self.TEXT}]}
         self.assertEqual(len(self.history([page])), 1)
+
+    def test_template_request_from_another_bot_is_a_config_error_not_silence(self):
+        page = {'ok': True, 'messages': [{'bot_id': 'BNEW', 'ts': '1.2', 'text': self.TEXT}]}
+        with self.assertRaises(DigestError) as ctx:
+            self.history([page])
+        self.assertEqual(ctx.exception.kind, 'config')
+        self.assertIn('SLACK_LEAVE_BOT_ID', str(ctx.exception))
+        self.assertEqual(ctx.exception.detail, 'Slack message ts 1.2, bot BNEW')
 
     def test_pagination_follows_cursor_and_rejects_incomplete_history(self):
         msg = {'bot_id': 'BSOURCE', 'text': self.TEXT}
