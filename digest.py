@@ -326,25 +326,6 @@ class Sheets:
         self.write([{"range": "'Digest State'!A1:B1", "values": [["Date", "Status"]]},
                     {"range": f"'Digest State'!A{row}:B{row}", "values": [[today.isoformat(), status]]}])
 
-    def create_mapping(self, month):
-        title = "Employee Mapping"
-        if title in self.titles:
-            raise DigestError("Employee Mapping already exists; it was not overwritten.")
-        result = self.request("POST", ":batchUpdate", json={"requests": [{"addSheet": {"properties": {
-            "title": title, "gridProperties": {"rowCount": 5000, "columnCount": 2, "frozenRowCount": 1}}}}]})
-        self.titles.add(title)
-        rows = [["Slack User ID", "Tracker Name"]] + [["", str(cell(month.rows[r], month.name_col)).strip()]
-                                                       for r in month.people.values()]
-        self.write([{"range": "'Employee Mapping'!A1", "values": rows}])
-        sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
-        self.request("POST", ":batchUpdate", json={"requests": [
-            {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
-                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
-                                     "backgroundColor": {"red": 0.85, "green": 0.91, "blue": 0.97}}},
-                            "fields": "userEnteredFormat"}},
-            {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 2},
-                                           "properties": {"pixelSize": 300}, "fields": "pixelSize"}}]})
-
 
 def slack_requests(today, last_day):
     import requests
@@ -443,22 +424,9 @@ def send_alert(kind, message, detail=None):
 
 def run():
     mode = os.getenv("RUN_MODE", "preview")
-    if mode not in ("preview", "live", "setup-mapping"):
-        raise DigestError("RUN_MODE must be preview, live or setup-mapping.")
+    if mode not in ("preview", "live"):
+        raise DigestError("RUN_MODE must be preview or live.")
     today = datetime.now(ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))).date()
-    if mode == "setup-mapping":
-        sheets = Sheets()
-        title = today.strftime("%B %Y")
-        max_rows = int(os.getenv("CALENDAR_MAX_ROWS", "500"))
-        if not 2 <= max_rows <= 5000:
-            raise DigestError("CALENDAR_MAX_ROWS must be 2–5000.")
-        rows = sheets.read(title, f"A1:AZ{max_rows}")
-        if len(rows) >= max_rows:
-            raise DigestError("Calendar row limit reached.")
-        sheets.create_mapping(Month(title, rows, today.year, today.month))
-        employee_mapping(sheets.read("Employee Mapping", "A1:B5000"))
-        print("Employee Mapping created with roster names. Fill Slack User IDs in the private tracker.")
-        return
     if os.getenv("SKIP_WEEKENDS", "true").lower() == "true" and today.weekday() >= 5:
         print("Skipped weekend.")
         return
