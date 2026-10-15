@@ -445,13 +445,24 @@ def send_alert(kind, message, detail=None):
         print("Owner alert could not be delivered; check the Actions run.", file=sys.stderr)
 
 
+def skipped(reason):
+    """A clean skip is not a failure: say so loudly, so a green run with no Teams post is not a mystery."""
+    message = f"SKIPPED: {reason}. Nothing was written to the sheet or posted to Teams."
+    print(message)
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        print(f"::notice title=Digest skipped::{message}")
+        if os.getenv("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+                out.write(f"### Digest skipped\n{message}\n")
+
+
 def run():
     mode = os.getenv("RUN_MODE", "preview")
     if mode not in ("preview", "live"):
         raise DigestError("RUN_MODE must be preview or live.")
     today = datetime.now(ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))).date()
     if os.getenv("SKIP_WEEKENDS", "true").lower() == "true" and today.weekday() >= 5:
-        print("Skipped weekend.")
+        skipped("today is a weekend (SKIP_WEEKENDS is on)")
         return
     if mode == "live":
         # Fail before touching the sheet if the leadership/alert targets are unsafe or missing.
@@ -485,11 +496,12 @@ def run():
     if os.getenv("SKIP_HOLIDAYS", "true").lower() == "true":
         codes = [this_month.code(r, today) for r in this_month.people.values()]
         if codes and all(c == "HL" for c in codes):
-            print("Skipped company holiday.")
+            skipped("today is a company holiday (every roster row is HL)")
             return
     status, state_row = sheets.state(today)
     if mode == "live" and status == "accepted":
-        print("Today's digest was already sent. No changes made.")
+        skipped("today's digest was already sent. To send it again, delete today's row in the "
+                "Digest State tab and run live again")
         return
     if mode == "live" and status and status != "failed":
         # pending, or a hand-typed value: delivery is unverified. Alert instead of exiting quietly.

@@ -80,7 +80,7 @@ In live mode, if the run cannot safely produce a correct digest, **nothing is po
 | Stale | Calendar or mapping edited during the run | Safe to re-run. |
 | Delivery needs review | Teams outcome unknown (timeout), a state write failed, or a re-run found today's state `pending`/unrecognised | Check the leadership channel and Power Automate history **before** clearing today's `Digest State` row. |
 
-A transient Teams rejection (429/5xx) is retried once. If Teams definitively rejects the post, the day is marked `failed`; fix the webhook and re-run today's `live` job manually (state is per date, so the next scheduled run does not retry today). A timeout stays `pending` and blocks resends; re-running while `pending` alerts instead of exiting quietly. A **manual `live` run posts to leadership and uses up that day's send**, so the scheduled run is skipped; use `preview` unless you mean it.
+A run that skips (weekend, company holiday, or today's digest already sent) still goes green, but it logs `SKIPPED: <reason>`, adds a notice to the run page and a job summary, and says nothing was written or posted. To re-send after an `accepted` day, delete today's row in the `Digest State` tab and run `live` again. A transient Teams rejection (429/5xx) is retried once. If Teams definitively rejects the post, the day is marked `failed`; fix the webhook and re-run today's `live` job manually (state is per date, so the next scheduled run does not retry today). A timeout stays `pending` and blocks resends; re-running while `pending` alerts instead of exiting quietly. A **manual `live` run posts to leadership and uses up that day's send**, so the scheduled run is skipped; use `preview` unless you mean it.
 
 ## Recovery and limits
 
