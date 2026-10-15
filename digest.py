@@ -1,10 +1,10 @@
 """Slack leave workflow -> monthly Sheets calendar -> Teams daily digest."""
 import calendar
-import html
 import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlparse
@@ -12,13 +12,32 @@ from zoneinfo import ZoneInfo
 
 
 class DigestError(Exception):
-    """Only fixed, non-sensitive error messages may reach public logs."""
+    """Only fixed, non-sensitive error messages may reach public logs.
+
+    kind selects the owners' alert wording: conflict, config, stale or delivery.
+    detail names the offending record. It goes only to the owners' alert channel, never to logs.
+    """
+
+    def __init__(self, message, kind="config", detail=None):
+        super().__init__(message)
+        self.kind, self.detail = kind, detail
 
 
 def required(key):
     value = os.getenv(key, "").strip()
     if not value:
         raise DigestError(f"Missing configuration: {key}")
+    return value
+
+
+def webhook_url(key):
+    value = required(key)
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise DigestError(f"{key} must be an HTTPS webhook URL.")
+    host = parsed.hostname.lower()
+    if host == "outlook.office.com" or host.endswith(".webhook.office.com"):
+        raise DigestError(f"{key} is a retired Office 365 connector URL; use a Teams Workflows webhook.")
     return value
 
 
@@ -85,15 +104,18 @@ def parse_request(message):
     match = REQUEST.search(text)
     if not match:
         if "unplanned" in text.casefold() and "applied a" in text.casefold():
-            raise DigestError("A leave workflow request has an unsupported format; inspect Slack privately.")
+            raise DigestError("A leave workflow request has an unsupported format; inspect Slack privately.", "conflict",
+                          f"Slack message ts {message.get('ts', '?')}, user {message.get('user', '?')}")
         return None
     user, start, end, duration = match.groups()
     try:
         start, end = date.fromisoformat(start), date.fromisoformat(end)
     except ValueError:
-        raise DigestError("A Slack request contains an invalid date.") from None
+        raise DigestError("A Slack request contains an invalid date.", "conflict",
+                          f"Slack user {user}: {start} to {end}") from None
     if end < start or (end - start).days > 366:
-        raise DigestError("A Slack request has an invalid date range.")
+        raise DigestError("A Slack request has an invalid date range.", "conflict",
+                          f"Slack user {user}: {start} to {end}")
     return Leave(user, start, end, "SL" if duration.casefold() == "full day" else "HD")
 
 
@@ -140,19 +162,23 @@ class Month:
 
     def plan(self, leave, name, today, last_day):
         start, end = max(leave.start, today), min(leave.end, last_day)
-        days = [d for d in self.dates if start <= d <= end]
+        # Weekend cells may be blank in the tracker; never invent leave on them.
+        days = [d for d in self.dates if start <= d <= end and d.weekday() < 5]
         if not days:
             return []
         r = self.people.get(normalized(name))
         if r is None:
-            raise DigestError("A mapped employee is missing from the calendar; check Employee Mapping privately.")
+            raise DigestError("A mapped employee is missing from the calendar; check Employee Mapping privately.", "conflict",
+                              f"Tracker name '{name}' not found in {self.title}")
         writes = []
         for day in days:
             old = self.code(r, day)
-            if old in ("WK", "HL") or old == leave.code:
+            # A full-day SL already covers a half-day request for the same day.
+            if old in ("WK", "HL") or old == leave.code or (old == "SL" and leave.code == "HD"):
                 continue
             if old:
-                raise DigestError("Leave conflicts with an existing calendar entry; resolve it privately before retrying.")
+                raise DigestError("Leave conflicts with an existing calendar entry; resolve it privately before retrying.",
+                                  "conflict", f"{name}, {day:%d %b %Y}: tracker has {old}, Slack requested {leave.code}")
             c = self.dates[day]
             writes.append({"range": f"{sheet_ref(self.title)}!{column(c+1)}{r+1}", "values": [[leave.code]]})
             while len(self.rows[r]) <= c:
@@ -161,21 +187,39 @@ class Month:
         return writes
 
 
+def ordinal(n):
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def date_list(days):
-    """Compress only genuinely consecutive dates; never invent leave on a holiday."""
+    """Compress only genuinely consecutive dates ("19-30th Oct"); never invent leave on a holiday."""
     groups = []
     for d in sorted(set(days)):
         if groups and d == groups[-1][-1] + timedelta(days=1):
             groups[-1].append(d)
         else:
             groups.append([d])
-    return ", ".join(g[0].strftime("%d %b") if len(g) == 1 else
-                     f"{g[0]:%d %b}–{g[-1]:%d %b}" for g in groups)
+    out = []
+    for g in groups:
+        a, b = g[0], g[-1]
+        if a == b:
+            out.append(f"{ordinal(a.day)} {a:%b}")
+        elif (a.year, a.month) == (b.year, b.month):
+            out.append(f"{a.day}-{ordinal(b.day)} {b:%b}")
+        else:
+            out.append(f"{ordinal(a.day)} {a:%b}-{ordinal(b.day)} {b:%b}")
+    return ", ".join(out)
+
+
+KNOWN_CODES = {"SL", "HD", "PL", "HL", "WK", "CPL"}
+MAX_ITEMS = 50
+MAX_CARD_BYTES = 24000  # Teams Workflows webhooks reject messages of roughly 28 KB and over.
 
 
 def make_digest(months, today, last_day):
     sections = {"Upcoming Holidays": [], "Sick/Emergency Leaves": [], "Half-day Leaves": [],
-                "Planned Leaves": [], "Upcoming Leaves": []}
+                "Planned Leaves": [], "Upcoming Leaves": [], "Other Entries": []}
     holidays, planned = set(), {}
     for month in months:
         for name, r in month.people.items():
@@ -191,15 +235,23 @@ def make_digest(months, today, last_day):
                         # HD alone does not encode whether the leave was planned.
                         sections["Half-day Leaves"].append(f"{display}: Half day (type unspecified in tracker)")
                     elif code == "PL":
-                        sections["Planned Leaves"].append(f"{display}: {day:%d %b}")
+                        sections["Planned Leaves"].append(f"{display}: {ordinal(day.day)} {day:%b}")
+                    elif code and code not in KNOWN_CODES:
+                        # Never drop an entry leadership might need; show it unclassified.
+                        sections["Other Entries"].append(f"{display}: {code} (unrecognized code)")
                 if today < day <= last_day and code == "PL":
                     planned.setdefault(display, []).append(day)
-    sections["Upcoming Holidays"] = [d.strftime("%A, %d %B %Y") for d in sorted(holidays)]
+    sections["Upcoming Holidays"] = [f"{d:%A, %B} {d.day}, {d.year}" for d in sorted(holidays)]
     sections["Upcoming Leaves"] = [f"{name}: {date_list(days)}" for name, days in sorted(planned.items())]
-    lines = [f"Leaves: {today:%d %B %Y}"]
+    lines = [f"Leaves: {ordinal(today.day)} {today:%B %Y}"]
     for title, items in sections.items():
+        if title == "Other Entries" and not items:
+            continue
         lines.extend(["", title + ":"])
-        lines.extend([f"{i}. {item}" for i, item in enumerate(items, 1)] or ["None"])
+        shown = [f"{i}. {item}" for i, item in enumerate(items[:MAX_ITEMS], 1)]
+        if len(items) > MAX_ITEMS:
+            shown.append(f"...and {len(items) - MAX_ITEMS} more")
+        lines.extend(shown or ["None"])
     return "\n".join(lines)
 
 
@@ -279,7 +331,7 @@ def slack_requests(today, last_day):
     zone = ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))
     oldest = datetime.combine(today - timedelta(days=lookback), datetime.min.time(), zone).timestamp()
     params = {"channel": required("SLACK_CHANNEL_ID"), "oldest": str(oldest), "limit": 100}
-    results = []
+    results, ignored = [], 0
     for _ in range(100):
         response = requests.get("https://slack.com/api/conversations.history", params=params,
                                 headers={"Authorization": "Bearer " + required("SLACK_BOT_TOKEN")}, timeout=45)
@@ -293,26 +345,80 @@ def slack_requests(today, last_day):
             if source and message.get("bot_id") != source:
                 continue
             leave = parse_request(message)
+            if leave is None and message.get("bot_id"):
+                ignored += 1
             if leave and leave.end >= today and leave.start <= last_day:
                 results.append(leave)
         cursor = data.get("response_metadata", {}).get("next_cursor", "")
         if not cursor:
             if data.get("has_more"):
                 raise DigestError("Slack history pagination was incomplete; no changes were made.")
+            if ignored:  # Count only; a reworded workflow template would otherwise be invisible.
+                print(f"{ignored} bot messages in the lookback window were not recognised as leave requests.")
             return results
         params["cursor"] = cursor
     raise DigestError("Slack history exceeded the scan limit; narrow the lookback.")
 
 
-def teams_payload(text):
-    # The standard Teams Workflows incoming-webhook template accepts Adaptive Cards.
+def build_card(title, style, text, link=None):
+    """Adaptive Card for a Teams Workflows webhook (same envelope as the Azure pipelines).
+
+    Card text is markdown, where a single newline collapses to a space, so every
+    line becomes its own paragraph and every blank-line-separated group its own block.
+    """
+    if style:
+        body = [{"type": "Container", "style": style, "bleed": True, "items": [
+            {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": True}]}]
+    else:  # leadership digest: plain text, same look as the previously hand-posted message
+        body = [{"type": "TextBlock", "text": title, "wrap": True}]
+    for group in text.split("\n\n"):
+        lines = [line for line in group.split("\n") if line.strip()]
+        if lines:
+            body.append({"type": "TextBlock", "text": "\n\n".join(lines), "wrap": True, "spacing": "Medium"})
+    card = {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard", "version": "1.4", "body": body}
+    if link:
+        card["actions"] = [{"type": "Action.OpenUrl", "title": "View run", "url": link}]
     return {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
-            "contentUrl": None, "content": {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-            "type": "AdaptiveCard", "version": "1.2", "body": [
-                {"type": "TextBlock", "text": html.escape(text), "wrap": True}]}}]}
+                                                "contentUrl": None, "content": card}]}
 
 
-def main():
+def digest_card(text):
+    title, _, rest = text.partition("\n")
+    return build_card(title, None, rest.strip("\n"))
+
+
+ALERT_NEXT = {
+    "conflict": "Needs a manual data fix in Slack or the tracker; then re-run.",
+    "config": "Fix the configuration or access problem; then re-run.",
+    "stale": "The tracker changed during the run. Safe to re-run.",
+    "delivery": "Delivery to leadership is uncertain. Check the leadership channel and Power Automate run history BEFORE clearing today's Digest State row.",
+    "unexpected": "Unexpected failure. Check the Actions run.",
+}
+
+
+def send_alert(kind, message, detail=None):
+    """Tell the owners' channel the digest was not sent. Never raises; never masks the real error."""
+    if os.getenv("RUN_MODE") != "live":
+        return
+    try:
+        import requests
+        server, repo, run_id = (os.getenv(k, "") for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+        link = f"{server}/{repo}/actions/runs/{run_id}" if server and repo and run_id else None
+        title = "Leave digest delivery needs review" if kind == "delivery" else "Leave digest NOT sent"
+        text = f"{message}\n\n{detail}\n\n{ALERT_NEXT[kind]}" if detail else f"{message}\n\n{ALERT_NEXT[kind]}"
+        card = build_card(title, "attention", text, link)
+        response = requests.post(webhook_url("ALERT_WEBHOOK_URL"), json=card, timeout=15, allow_redirects=False)
+        if not 200 <= response.status_code < 300:
+            raise ValueError
+        if os.getenv("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                out.write("alerted=true\n")
+    except Exception:
+        print("Owner alert could not be delivered; check the Actions run.", file=sys.stderr)
+
+
+def run():
     mode = os.getenv("RUN_MODE", "preview")
     if mode not in ("preview", "live", "setup-mapping"):
         raise DigestError("RUN_MODE must be preview, live or setup-mapping.")
@@ -333,6 +439,11 @@ def main():
     if os.getenv("SKIP_WEEKENDS", "true").lower() == "true" and today.weekday() >= 5:
         print("Skipped weekend.")
         return
+    if mode == "live":
+        # Fail before touching the sheet if the leadership/alert targets are unsafe or missing.
+        webhook = webhook_url("TEAMS_WEBHOOK_URL")
+        webhook_url("ALERT_WEBHOOK_URL")
+        required("SLACK_LEAVE_BOT_ID")
     days = int(os.getenv("UPCOMING_DAYS", "0"))
     if not 0 <= days <= 90:
         raise DigestError("UPCOMING_DAYS must be 0 (month end) or 1–90.")
@@ -363,17 +474,26 @@ def main():
             print("Skipped company holiday.")
             return
     status, state_row = sheets.state(today)
-    if mode == "live" and status:
-        print("Today's digest is already sent or awaiting delivery verification. No changes made.")
+    if mode == "live" and status == "accepted":
+        print("Today's digest was already sent. No changes made.")
         return
+    if mode == "live" and status and status != "failed":
+        # pending, or a hand-typed value: delivery is unverified. Alert instead of exiting quietly.
+        raise DigestError("Today's digest is awaiting delivery verification (state is not accepted or failed); nothing was sent.",
+                          "delivery")
     writes = []
     leaves = slack_requests(today, last_day)
-    for leave in leaves:
+    # Full-day SL first, so a same-day half-day request is covered by it instead of conflicting.
+    for leave in sorted(leaves, key=lambda l: l.code != "SL"):
         if leave.user not in mapping:
-            raise DigestError("An active Slack applicant is unmapped; update Employee Mapping in the private tracker.")
+            raise DigestError("An active Slack applicant is unmapped; update Employee Mapping in the private tracker.",
+                              "conflict", f"Slack user {leave.user}: {leave.start} to {leave.end}")
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))
     text = make_digest(months, today, last_day)
+    card = digest_card(text)
+    if len(json.dumps(card)) > MAX_CARD_BYTES:
+        raise DigestError("The digest card is too large for a Teams webhook; reduce the roster window.")
     if mode == "preview":
         # Never print HR data or upload it as a public Actions artifact.
         private_path = os.getenv("PRIVATE_PREVIEW_PATH", "")
@@ -386,24 +506,49 @@ def main():
         print(f"Preview passed: {len(leaves)} active requests; {len(writes)} calendar updates. No writes or Teams post.")
         return
     import requests
-    webhook = required("TEAMS_WEBHOOK_URL")
-    parsed = urlparse(webhook)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise DigestError("TEAMS_WEBHOOK_URL must be an HTTPS webhook URL.")
     # Refetch before writes to detect intervening edits. Sheets has no conditional cell write.
     for month in months:
         if sheets.read(month.title, f"A1:AZ{max_rows}") != originals[month.title]:
-            raise DigestError("Calendar changed during the run; retry after reviewing privately.")
+            raise DigestError("Calendar changed during the run; retry after reviewing privately.", "stale")
     if employee_mapping(sheets.read("Employee Mapping", "A1:B5000")) != mapping:
-        raise DigestError("Employee Mapping changed during the run; retry after reviewing privately.")
+        raise DigestError("Employee Mapping changed during the run; retry after reviewing privately.", "stale")
     sheets.write(writes)
     # Reserve before POST. An ambiguous timeout must not cause an automatic duplicate.
     sheets.claim(today, state_row, "pending")
-    response = requests.post(webhook, json=teams_payload(text), timeout=45, allow_redirects=False)
+    try:
+        response = requests.post(webhook, json=card, timeout=45, allow_redirects=False)
+        if response.status_code == 429 or response.status_code >= 500:
+            time.sleep(5)  # one retry for a transient rejection; nothing was accepted, so no duplicate risk
+            response = requests.post(webhook, json=card, timeout=45, allow_redirects=False)
+    except requests.RequestException:
+        # Ambiguous: the message may have arrived. State stays pending to block an automatic duplicate.
+        raise DigestError("Teams delivery outcome is unknown; verify delivery privately before clearing pending state.",
+                          "delivery") from None
     if not 200 <= response.status_code < 300:
-        raise DigestError("Teams did not accept the webhook; verify delivery privately before clearing pending state.")
-    sheets.claim(today, state_row, "accepted")
+        # Definite rejection: nothing was posted. 'failed' lets a manual same-day live re-run retry.
+        try:
+            sheets.claim(today, state_row, "failed")
+        except DigestError:
+            raise DigestError("Teams rejected the webhook request and the failed state could not be recorded; "
+                              "state stays pending.", "delivery") from None
+        raise DigestError("Teams rejected the webhook request; nothing was posted. Fix the webhook, then re-run today's live job manually.")
+    try:
+        sheets.claim(today, state_row, "accepted")
+    except DigestError:
+        raise DigestError("Digest was posted but its accepted state could not be recorded; state stays pending.",
+                          "delivery") from None
     print("Calendar updated; Teams webhook accepted. Verify delivery in Teams/Power Automate run history.")
+
+
+def main():
+    try:
+        run()
+    except DigestError as exc:
+        send_alert(exc.kind, str(exc), exc.detail)
+        raise
+    except Exception:
+        send_alert("unexpected", "The digest job failed unexpectedly.")
+        raise
 
 
 if __name__ == "__main__":

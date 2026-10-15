@@ -32,6 +32,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
       - name: Run digest (private data is never logged)
+        id: digest
         run: python digest.py
         env:
           RUN_MODE: ${{ github.event_name == 'schedule' && 'live' || inputs.mode }}
@@ -41,9 +42,28 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
           UPCOMING_DAYS: ${{ vars.UPCOMING_DAYS || '0' }}
           SKIP_WEEKENDS: ${{ vars.SKIP_WEEKENDS || 'true' }}
           SKIP_HOLIDAYS: ${{ vars.SKIP_HOLIDAYS || 'true' }}
           SLACK_LOOKBACK_DAYS: ${{ vars.SLACK_LOOKBACK_DAYS || '90' }}
           CALENDAR_MAX_ROWS: ${{ vars.CALENDAR_MAX_ROWS || '500' }}
+      # Backstop for failures before digest.py could alert (install, tests, crash, timeout/cancel).
+      - name: Alert owners on early failure
+        if: always() && steps.digest.outcome != 'success' && (github.event_name == 'schedule' || inputs.mode == 'live') && steps.digest.outputs.alerted != 'true'
+        continue-on-error: true
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          card = {"type": "AdaptiveCard", "version": "1.4", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "body": [{"type": "TextBlock", "weight": "Bolder", "wrap": True, "text": "Leave digest NOT sent"},
+                           {"type": "TextBlock", "wrap": True, "text": "The job failed before it could finish. Check the Actions run."}],
+                  "actions": [{"type": "Action.OpenUrl", "title": "View run", "url": os.environ["RUN_URL"]}]}
+          body = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]}
+          req = urllib.request.Request(os.environ["ALERT_WEBHOOK_URL"], json.dumps(body).encode(), {"Content-Type": "application/json"})
+          urllib.request.urlopen(req, timeout=15)
+          PY
