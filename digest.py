@@ -400,9 +400,9 @@ def build_card(title, style, text, link=None):
 
 
 def digest_card(text):
-    """Leadership card: shaded title band, then one bold heading (with a count) and a bullet list per section.
+    """Leadership card: shaded title band, then one bold heading (with a count) and a numbered list per section.
 
-    Bullets rather than numbers: Teams clips the number of a two-digit ordered-list item.
+    ponytail: Teams may clip the number of a two-digit list item (10+ entries); switch back to bullets if it matters.
     """
     title, _, rest = text.partition("\n")
     body = [{"type": "Container", "style": "emphasis", "bleed": True, "items": [
@@ -416,7 +416,7 @@ def digest_card(text):
         body.append({"type": "TextBlock", "text": f"{name} ({len(entries)})" if entries else name,
                      "weight": "Bolder", "size": "Medium", "wrap": True, "separator": True, "spacing": "Large"})
         if entries:
-            body.append({"type": "TextBlock", "text": "\n".join(f"- {e}" for e in entries), "wrap": True, "spacing": "Small"})
+            body.append({"type": "TextBlock", "text": "\n".join(f"{i}. {e}" for i, e in enumerate(entries, 1)), "wrap": True, "spacing": "Small"})
         else:
             body.append({"type": "TextBlock", "text": "None", "isSubtle": True, "spacing": "Small"})
         for note in notes:
