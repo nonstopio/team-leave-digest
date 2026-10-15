@@ -398,6 +398,28 @@ class MainTests(unittest.TestCase):
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
 
+    def test_skips_say_why_and_how_to_resend(self):
+        with patch('builtins.print') as out:
+            self.run_job('live', status='accepted')
+        self.assertIn('SKIPPED: today\'s digest was already sent', out.call_args.args[0])
+        self.assertIn('delete today\'s row in the Digest State tab', out.call_args.args[0])
+        self.assertIn('Nothing was written', out.call_args.args[0])
+        with patch('builtins.print') as out:
+            self.run_job('live', now=date(2026, 10, 17))
+        self.assertIn('SKIPPED: today is a weekend', out.call_args.args[0])
+
+    def test_skip_adds_actions_notice_and_job_summary(self):
+        summary = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'gh_summary_test')
+        open(summary, 'w').close()
+        with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'GITHUB_STEP_SUMMARY': summary}), \
+             patch('builtins.print') as out:
+            digest.skipped('test reason')
+        self.assertTrue(any(c.args[0].startswith('::notice title=Digest skipped::SKIPPED: test reason')
+                            for c in out.call_args_list))
+        with open(summary) as f:
+            self.assertIn('### Digest skipped\nSKIPPED: test reason', f.read())
+        os.remove(summary)
+
     def test_weekend_skip_is_quiet_even_in_live_mode(self):
         sheets, post, error = self.run_job('live', now=date(2026, 10, 17))  # Saturday
         self.assertIsNone(error)
