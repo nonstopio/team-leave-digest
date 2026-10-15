@@ -269,9 +269,10 @@ class DigestTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False, leaves=None, post_error=None,
-                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None):
+                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026')):
         rows = month().rows
         sheets = Mock()
+        sheets.titles = set(titles) | {'Employee Mapping', 'Digest State'}
         mapping_rows = mapping_extra or [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
         mapping_reads = []
 
@@ -432,6 +433,35 @@ class MainTests(unittest.TestCase):
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
 
+    def test_missing_next_month_tab_sends_a_heads_up_but_still_posts(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',))
+        self.assertIsNone(error)
+        self.assertEqual(self.posted(post), ['alert', 'leadership'])
+        alert = str(post.call_args_list[0].kwargs['json'])
+        self.assertIn('heads-up', alert)
+        self.assertIn("'November 2026' does not exist", alert)
+        self.assertNotIn('NOT sent', alert)
+
+    def test_no_heads_up_early_in_month_or_when_tab_exists(self):
+        for kwargs in ({'now': date(2026, 10, 15), 'titles': ('October 2026',)}, {'now': date(2026, 10, 26)}):
+            sheets, post, error = self.run_job('live', **kwargs)
+            self.assertEqual(self.posted(post), ['leadership'])
+
+    def test_mapping_names_missing_from_calendar_are_counted_not_named(self):
+        mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V1'],
+                   ['U9', 'Ghost Person', 'Shadow QA', 'V1']]
+        with patch('builtins.print') as out:
+            self.run_job('live', mapping_extra=mapping)
+        line = next(c.args[0] for c in out.call_args_list if 'not found in the October 2026 calendar' in c.args[0])
+        self.assertIn('1 Employee Mapping name(s)', line)
+        self.assertIn('1 marked Shadow', line)
+        self.assertNotIn('Ghost', line)
+
+    def test_same_alert_and_leadership_url_is_warned_about(self):
+        with patch('builtins.print') as out:
+            self.run_job('live', env_extra={'ALERT_WEBHOOK_URL': 'https://example.invalid/leadership'})
+        self.assertTrue(any('ALERT_WEBHOOK_URL equals TEAMS_WEBHOOK_URL' in c.args[0] for c in out.call_args_list))
+
     def test_applicants_outside_the_team_are_ignored_not_fatal(self):
         day = date(2026, 10, 15)
         leaves = [Leave('U123', day, day, 'SL'), Leave('U777', day, day, 'SL'), Leave('U555', day, day, 'HD')]
@@ -529,6 +559,41 @@ class MainTests(unittest.TestCase):
                      self.assertRaises(DigestError):
                     digest.run()
                 sheets_cls.assert_not_called()
+
+
+class RetryTests(unittest.TestCase):
+    def test_retrying_recovers_from_transient_errors_but_not_client_errors(self):
+        ok, busy, bad = (SimpleNamespace(status_code=c) for c in (200, 503, 404))
+        with patch.object(digest.time, 'sleep') as sleep:
+            self.assertIs(digest.retrying(Mock(side_effect=[busy, ok])), ok)
+            self.assertIs(digest.retrying(Mock(side_effect=[OSError(), busy, ok])), ok)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [2, 2, 4])
+            self.assertIs(digest.retrying(Mock(side_effect=[bad])), bad)  # a 4xx is not retried
+            self.assertIs(digest.retrying(Mock(side_effect=[busy, busy, busy])), busy)  # gives up after 3 tries
+            with self.assertRaises(OSError):
+                digest.retrying(Mock(side_effect=OSError()))
+
+    def test_sheets_request_retries_then_reports_unreachable(self):
+        sheets = digest.Sheets.__new__(digest.Sheets)
+        sheets.base = 'https://example.invalid'
+        sheets.http = Mock()
+        sheets.http.request.side_effect = [SimpleNamespace(status_code=500, ok=False),
+                                           SimpleNamespace(status_code=200, ok=True, json=lambda: {'ok': 1})]
+        with patch.object(digest.time, 'sleep'):
+            self.assertEqual(sheets.request('GET', '/x'), {'ok': 1})
+            sheets.http.request.side_effect = OSError('boom')
+            with self.assertRaises(DigestError) as ctx:
+                sheets.request('GET', '/x')
+        self.assertNotIn('boom', str(ctx.exception))
+
+    def test_slack_unreachable_is_a_clean_error(self):
+        env = {'SLACK_CHANNEL_ID': 'C1', 'SLACK_BOT_TOKEN': 'x', 'SLACK_LEAVE_BOT_ID': 'B'}
+        get = Mock(side_effect=OSError('secret detail'))
+        with patch.dict(os.environ, env, clear=True), patch.object(digest.time, 'sleep'), \
+             patch.dict(sys.modules, {'requests': SimpleNamespace(get=get)}), self.assertRaises(DigestError) as ctx:
+            digest.slack_requests(date(2026, 10, 15), date(2026, 10, 31))
+        self.assertEqual(get.call_count, 3)
+        self.assertNotIn('secret detail', str(ctx.exception))
 
 
 class SlackAndStateTests(unittest.TestCase):
