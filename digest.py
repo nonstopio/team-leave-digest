@@ -229,7 +229,7 @@ def date_list(days):
         if a == b:
             out.append(f"{ordinal(a.day)} {a:%b}")
         elif (a.year, a.month) == (b.year, b.month):
-            out.append(f"{a.day}-{ordinal(b.day)} {b:%b}")
+            out.append(f"{ordinal(a.day)}-{ordinal(b.day)} {b:%b}")
         else:
             out.append(f"{ordinal(a.day)} {a:%b}-{ordinal(b.day)} {b:%b}")
     return ", ".join(out)
@@ -388,8 +388,31 @@ def build_card(title, style, text, link=None):
 
 
 def digest_card(text):
+    """Leadership card: shaded title band, then one bold heading (with a count) and a bullet list per section.
+
+    Bullets rather than numbers: Teams clips the number of a two-digit ordered-list item.
+    """
     title, _, rest = text.partition("\n")
-    return build_card(title, None, rest.strip("\n"))
+    body = [{"type": "Container", "style": "emphasis", "bleed": True, "items": [
+        {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Large", "wrap": True}]}]
+    for group in rest.strip("\n").split("\n\n"):
+        heading, _, items = group.partition("\n")
+        lines = [line for line in items.split("\n") if line.strip()]
+        entries = [re.sub(r"^\d+\.\s+", "", line) for line in lines if re.match(r"\d+\.\s", line)]
+        notes = [line for line in lines if not re.match(r"\d+\.\s", line) and line != "None"]
+        name = heading.rstrip(":")
+        body.append({"type": "TextBlock", "text": f"{name} ({len(entries)})" if entries else name,
+                     "weight": "Bolder", "size": "Medium", "wrap": True, "separator": True, "spacing": "Large"})
+        if entries:
+            body.append({"type": "TextBlock", "text": "\n".join(f"- {e}" for e in entries), "wrap": True, "spacing": "Small"})
+        else:
+            body.append({"type": "TextBlock", "text": "None", "isSubtle": True, "spacing": "Small"})
+        for note in notes:
+            body.append({"type": "TextBlock", "text": note, "isSubtle": True, "wrap": True, "spacing": "None"})
+    card = {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard",
+            "version": "1.4", "body": body}
+    return {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+                                                "contentUrl": None, "content": card}]}
 
 
 ALERT_NEXT = {

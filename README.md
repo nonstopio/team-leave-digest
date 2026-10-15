@@ -67,7 +67,7 @@ Applied on Keka: NO
 
 `Half Day` is also accepted. Formatting asterisks are tolerated. Keka application status does not determine availability. The mentioned member is the applicant, not the bot sender. The source combines sick/emergency, so the digest preserves that combined label. Existing `HD` cells do not encode planned versus unplanned; the summary gives them a separate half-day section without guessing. Leave reasons such as paternity are not inferred from `PL`.
 
-The leadership message is plain text in the established format (`Leaves: 15th October 2026`, numbered sections, dates like `19-30th Oct`). The summary lists holidays from today through the configured horizon, today's planned/sick/half-day entries, and future planned dates. It compresses consecutive dates but preserves holiday/weekend gaps. Current planned entries show today's date rather than reconstructing a leave period that began before the reporting window.
+The leadership card has a shaded title (`Leaves: 15th October 2026`) and one bold heading with a count per section, with bullet entries and dates like `19th-30th Oct`. Empty sections show a quiet "None". The summary lists holidays from today through the configured horizon, today's planned/sick/half-day entries, and future planned dates. It compresses consecutive dates but preserves holiday/weekend gaps. Current planned entries show today's date rather than reconstructing a leave period that began before the reporting window.
 
 ## Failure and conflict alerts
 

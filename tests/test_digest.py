@@ -104,7 +104,7 @@ class DigestTests(unittest.TestCase):
 
     def test_utilities_and_card(self):
         self.assertEqual(column(34), 'AH')
-        self.assertEqual(date_list([date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 30)]), '19-20th Oct, 30th Oct')
+        self.assertEqual(date_list([date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 30)]), '19th-20th Oct, 30th Oct')
         self.assertEqual(date_list([date(2026, 10, 19)]), '19th Oct')
         self.assertEqual(date_list([date(2026, 10, 30), date(2026, 10, 31), date(2026, 11, 1)]), '30th Oct-1st Nov')
         self.assertEqual([digest.ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 23)],
@@ -121,17 +121,34 @@ class DigestTests(unittest.TestCase):
         card = digest_card(make_digest([m], today, date(2026, 10, 31)))
         content = card['attachments'][0]['content']
         self.assertTrue(content['$schema'].startswith('http'))
-        # leadership digest is plain text like the previously hand-posted message: no coloured header
-        self.assertEqual(content['body'][0], {'type': 'TextBlock', 'text': 'Leaves: 15th October 2026', 'wrap': True})
-        self.assertNotIn('Container', [b['type'] for b in content['body']])
+        header = content['body'][0]
+        self.assertEqual((header['type'], header['style']), ('Container', 'emphasis'))
+        self.assertEqual(header['items'][0]['text'], 'Leaves: 15th October 2026')
         self.assertNotIn('actions', content)
-        texts = [b['text'] for b in content['body'] if b['type'] == 'TextBlock']
-        self.assertTrue(any("O'Brien & Sons: Sick/Emergency leave" in t for t in texts))
+        blocks = {b['text']: b for b in content['body'][1:]}
+        texts = list(blocks)
         self.assertFalse(any('&amp;' in t or '&#x27;' in t for t in texts))
-        # one paragraph per item: a single newline would collapse in Teams markdown
-        self.assertTrue(any(t.startswith('Sick/Emergency Leaves:\n\n1.') for t in texts))
-        self.assertTrue(any(t == 'Upcoming Leaves:\n\n1. O\'Brien & Sons: 19-20th Oct' for t in texts))
-        self.assertGreater(len(texts), 3)
+        # heading carries a count; entries are bullets (no numbers: Teams clips two-digit list numbers)
+        self.assertIn('Sick/Emergency Leaves (1)', blocks)
+        self.assertIn("- O'Brien & Sons: Sick/Emergency leave", texts)
+        self.assertIn("- O'Brien & Sons: 19th-20th Oct", texts)
+        self.assertFalse(any(t.startswith('1.') for t in texts))
+        # empty sections stay visible but quiet
+        self.assertEqual(blocks['None']['isSubtle'], True)
+        self.assertIn('Half-day Leaves', blocks)
+
+    def test_many_entries_render_as_one_bullet_block_with_overflow_note(self):
+        m, today = month(), date(2026, 10, 15)
+        m.rows.extend([[''] * m.name_col + [f'Person {i}'] + [''] * 31 for i in range(60)])
+        for r in range(1, len(m.rows)):
+            m.rows[r][m.dates[today]] = 'SL'
+        m = Month(m.title, m.rows, 2026, 10)
+        blocks = digest_card(make_digest([m], today, today))['attachments'][0]['content']['body']
+        texts = [b.get('text', '') for b in blocks]
+        self.assertIn('Sick/Emergency Leaves (50)', texts)
+        bullets = next(t for t in texts if t.startswith('- ') and 'Person 5' in t)
+        self.assertEqual(len(bullets.split('\n')), 50)
+        self.assertIn('...and 11 more', texts)
 
     def test_alert_card_has_attention_header_and_run_link(self):
         card = build_card('Leave digest NOT sent', 'attention', 'Fix it.', 'https://example.invalid/run/1')
