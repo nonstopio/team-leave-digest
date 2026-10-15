@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 import digest
-from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, make_digest, parse_request, shadow_names, webhook_url
+from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, make_digest, parse_request, shadow_names, team_labels, webhook_url
 
 
 def month(name_col=2):
@@ -163,6 +163,18 @@ class DigestTests(unittest.TestCase):
         m.rows[1][m.dates[today]] = 'SL'
         self.assertIn('Sample Employee', make_digest([m], today, today))
         self.assertNotIn('Sample Employee', make_digest([m], today, today, shadow_names(rows)))
+
+    def test_team_is_appended_to_names_in_every_section(self):
+        rows = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U1', 'Sample Employee', 'QA', 'INT'], ['U2', 'No Team', 'QA', '']]
+        self.assertEqual(team_labels(rows), {'sample employee': 'INT'})
+        self.assertEqual(team_labels([['Slack User ID', 'Tracker Name']]), {})
+        m, today = month(), date(2026, 10, 15)
+        m.rows[1][m.dates[today]] = 'SL'
+        m.rows[1][m.dates[date(2026, 10, 19)]] = 'PL'
+        text = make_digest([m], today, date(2026, 10, 31), teams=team_labels(rows))
+        self.assertIn('Sample Employee (INT): Sick/Emergency leave', text)
+        self.assertIn('Sample Employee (INT): 19th Oct', text)
+        self.assertIn('Sample Employee: Sick/Emergency leave', make_digest([m], today, today))  # no Team column: unchanged
 
     def test_alert_card_has_attention_header_and_run_link(self):
         card = build_card('Leave digest NOT sent', 'attention', 'Fix it.', 'https://example.invalid/run/1')
@@ -398,6 +410,19 @@ class MainTests(unittest.TestCase):
         card = str(post.call_args_list[0].kwargs['json'])
         self.assertNotIn('Sample Employee', card)
         self.assertIn('Sick/Emergency Leaves', card)
+
+    def test_live_card_shows_team_suffix(self):
+        mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'INT']]
+        sheets, post, error = self.run_job('live', mapping_extra=mapping)
+        self.assertIsNone(error)
+        self.assertIn('1. Sample Employee (INT): Sick/Emergency leave', str(post.call_args_list[0].kwargs['json']))
+
+    def test_team_change_during_run_is_treated_as_stale(self):
+        first = [['Slack User ID', 'Tracker Name', 'Team'], ['U123', 'Sample Employee', 'V1']]
+        later = [['Slack User ID', 'Tracker Name', 'Team'], ['U123', 'Sample Employee', 'V2']]
+        sheets, post, error = self.run_job('live', mapping_extra=first, mapping_later=later)
+        self.assertEqual(error.kind, 'stale')
+        sheets.write.assert_not_called()
 
     def test_role_change_during_run_is_treated_as_stale(self):
         first = [['Slack User ID', 'Tracker Name', 'Role'], ['U123', 'Sample Employee', 'QA']]

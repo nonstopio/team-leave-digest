@@ -90,6 +90,16 @@ def shadow_names(rows):
                      if cell(row, 1) and "shadow" in str(cell(row, role_col)).casefold())
 
 
+def team_labels(rows):
+    """{normalized tracker name: Team value}, from the mapping's `Team` column (found by header)."""
+    headers = [normalized(x) for x in rows[0]] if rows else []
+    if "team" not in headers:
+        return {}
+    team_col = headers.index("team")
+    return {normalized(cell(row, 1)): str(cell(row, team_col)).strip() for row in rows[1:]
+            if cell(row, 1) and str(cell(row, team_col)).strip()}
+
+
 @dataclass(frozen=True)
 class Leave:
     user: str
@@ -250,7 +260,7 @@ MAX_ITEMS = 50
 MAX_CARD_BYTES = 24000  # Teams Workflows webhooks reject messages of roughly 28 KB and over.
 
 
-def make_digest(months, today, last_day, hidden=frozenset()):
+def make_digest(months, today, last_day, hidden=frozenset(), teams=None):
     sections = {"Upcoming Holidays": [], "Sick/Emergency Leaves": [], "Half-day Leaves": [],
                 "Planned Leaves": [], "Upcoming Leaves": [], "Other Entries": []}
     holidays, planned = set(), {}
@@ -259,6 +269,8 @@ def make_digest(months, today, last_day, hidden=frozenset()):
             if name in hidden:
                 continue
             display = str(cell(month.rows[r], month.name_col)).strip()
+            if (teams or {}).get(name):
+                display = f"{display} ({teams[name]})"
             for day in month.dates:
                 code = month.code(r, day)
                 if today <= day <= last_day and code == "HL":
@@ -487,7 +499,7 @@ def run():
     last_day = today + timedelta(days=days) if days else today.replace(day=calendar.monthrange(today.year, today.month)[1])
     sheets = Sheets()
     mapping_rows = sheets.read("Employee Mapping", "A1:Z5000")
-    mapping, hidden = employee_mapping(mapping_rows), shadow_names(mapping_rows)
+    mapping, hidden, teams = employee_mapping(mapping_rows), shadow_names(mapping_rows), team_labels(mapping_rows)
     months, originals, current = [], {}, today.replace(day=1)
     max_rows = int(os.getenv("CALENDAR_MAX_ROWS", "500"))
     if not 2 <= max_rows <= 5000:
@@ -531,7 +543,7 @@ def run():
     for leave in sorted(leaves, key=lambda l: l.code != "SL"):
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))
-    text = make_digest(months, today, last_day, hidden)
+    text = make_digest(months, today, last_day, hidden, teams)
     card = digest_card(text)
     if len(json.dumps(card)) > MAX_CARD_BYTES:
         raise DigestError("The digest card is too large for a Teams webhook; reduce the roster window.")
@@ -552,7 +564,7 @@ def run():
         if sheets.read(month.title, f"A1:AZ{max_rows}") != originals[month.title]:
             raise DigestError("Calendar changed during the run; retry after reviewing privately.", "stale")
     latest = sheets.read("Employee Mapping", "A1:Z5000")
-    if (employee_mapping(latest), shadow_names(latest)) != (mapping, hidden):
+    if (employee_mapping(latest), shadow_names(latest), team_labels(latest)) != (mapping, hidden, teams):
         raise DigestError("Employee Mapping changed during the run; retry after reviewing privately.", "stale")
     sheets.write(writes)
     # Reserve before POST. An ambiguous timeout must not cause an automatic duplicate.
