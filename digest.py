@@ -507,10 +507,12 @@ def run():
     writes = []
     leaves = slack_requests(today, last_day)
     # Full-day SL first, so a same-day half-day request is covered by it instead of conflicting.
+    # The channel covers people outside this team: only mapped applicants are processed.
+    ignored = {leave.user for leave in leaves if leave.user not in mapping}
+    if ignored:
+        print(f"{len(ignored)} Slack applicant(s) with active requests are not in Employee Mapping and were ignored.")
+    leaves = [leave for leave in leaves if leave.user in mapping]
     for leave in sorted(leaves, key=lambda l: l.code != "SL"):
-        if leave.user not in mapping:
-            raise DigestError("An active Slack applicant is unmapped; update Employee Mapping in the private tracker.",
-                              "conflict", f"Slack user {leave.user}: {leave.start} to {leave.end}")
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))
     text = make_digest(months, today, last_day)
@@ -579,6 +581,8 @@ if __name__ == "__main__":
         main()
     except DigestError as exc:
         print(str(exc), file=sys.stderr)
+        if exc.detail and os.getenv("GITHUB_ACTIONS") != "true":
+            print("Detail (local run only):", exc.detail, file=sys.stderr)  # never in public Actions logs
         sys.exit(1)
     except Exception:
         # Exception strings and tracebacks can contain webhook URLs, names, or API bodies.
