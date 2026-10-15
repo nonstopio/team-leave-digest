@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 import digest
-from digest import DigestError, Leave, Month, column, date_list, make_digest, parse_request, teams_payload
+from digest import DigestError, Leave, Month, column, date_list, employee_mapping, make_digest, parse_request, teams_payload
 
 
 def month(name_col=2):
@@ -16,6 +16,17 @@ def month(name_col=2):
 
 
 class DigestTests(unittest.TestCase):
+    def test_mapping_accepts_unfilled_roster_and_trims_ids(self):
+        self.assertEqual(employee_mapping([['Slack User ID', 'Tracker Name'], ['', 'Unmapped Person'],
+                                           [' U123 ', 'Sample Employee']]), {'U123': 'Sample Employee'})
+
+    def test_mapping_rejects_duplicates_and_bad_rows(self):
+        for row in [['U123', 'Other'], ['U456', 'sample employee'], ['@sample', 'Other'], ['U789', '']]:
+            with self.assertRaises(DigestError):
+                employee_mapping([['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee'], row])
+        with self.assertRaises(DigestError):
+            employee_mapping([['Wrong', 'Headers']])
+
     def test_workflow_mention_not_bot_author(self):
         msg = {'bot_id': 'BSOURCE', 'user': 'UBOT', 'text':
                '<@U123> applied a *Unplanned - Sick/Emergency Leave* from 2026-10-15 to 2026-10-15. Full Day\nApplied on Keka: NO'}
@@ -83,16 +94,17 @@ class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False):
         rows = month().rows
         sheets = Mock()
-        sheets.read.side_effect = lambda *args: copy.deepcopy(rows)
+        mapping_rows = [['Slack User ID', 'Tracker Name'], ['U123', 'Sample Employee']]
+        sheets.read.side_effect = lambda title, area: copy.deepcopy(mapping_rows if title == 'Employee Mapping' else rows)
         sheets.state.return_value = (status, 2)
         if changed:
             modified = copy.deepcopy(rows)
             modified[1][2] = 'Renamed Employee'
-            sheets.read.side_effect = [copy.deepcopy(rows), modified]
+            sheets.read.side_effect = [mapping_rows, copy.deepcopy(rows), modified]
         clock = Mock()
         clock.now.return_value.date.return_value = date(2026, 10, 15)
         request = Mock(return_value=SimpleNamespace(status_code=post_status))
-        env = {'RUN_MODE': mode, 'EMPLOYEE_MAP_JSON': '{"U123":"Sample Employee"}',
+        env = {'RUN_MODE': mode,
                'TEAMS_WEBHOOK_URL': 'https://example.invalid/webhook'}
         leave = Leave('U123', date(2026, 10, 15), date(2026, 10, 15), 'SL')
         with patch.dict(os.environ, env, clear=True), patch.object(digest, 'datetime', clock), \

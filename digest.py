@@ -42,6 +42,25 @@ def normalized(value):
     return " ".join(str(value).casefold().split())
 
 
+def employee_mapping(rows):
+    if not rows or rows[0][:2] != ["Slack User ID", "Tracker Name"]:
+        raise DigestError("Employee Mapping must have Slack User ID and Tracker Name headers in A1:B1.")
+    if len(rows) >= 5000:
+        raise DigestError("Employee Mapping reached its row limit.")
+    mapping, names = {}, set()
+    for row in rows[1:]:
+        user, name = str(cell(row, 0)).strip(), str(cell(row, 1)).strip()
+        if not user:
+            continue  # Prefilled roster names can be mapped gradually.
+        if not re.fullmatch(r"[UW][A-Z0-9]+", user) or not name or name.startswith("="):
+            raise DigestError("Employee Mapping contains an invalid ID or missing/invalid tracker name.")
+        if user in mapping or normalized(name) in names:
+            raise DigestError("Employee Mapping contains duplicate IDs or tracker names.")
+        mapping[user] = name
+        names.add(normalized(name))
+    return mapping
+
+
 @dataclass(frozen=True)
 class Leave:
     user: str
@@ -118,7 +137,7 @@ class Month:
             return []
         r = self.people.get(normalized(name))
         if r is None:
-            raise DigestError("A mapped employee is missing from the calendar; check EMPLOYEE_MAP_JSON privately.")
+            raise DigestError("A mapped employee is missing from the calendar; check Employee Mapping privately.")
         writes = []
         for day in days:
             old = self.code(r, day)
@@ -224,6 +243,25 @@ class Sheets:
         self.write([{"range": "'Digest State'!A1:B1", "values": [["Date", "Status"]]},
                     {"range": f"'Digest State'!A{row}:B{row}", "values": [[today.isoformat(), status]]}])
 
+    def create_mapping(self, month):
+        title = "Employee Mapping"
+        if title in self.titles:
+            raise DigestError("Employee Mapping already exists; it was not overwritten.")
+        result = self.request("POST", ":batchUpdate", json={"requests": [{"addSheet": {"properties": {
+            "title": title, "gridProperties": {"rowCount": 5000, "columnCount": 2, "frozenRowCount": 1}}}}]})
+        self.titles.add(title)
+        rows = [["Slack User ID", "Tracker Name"]] + [["", str(cell(month.rows[r], month.name_col)).strip()]
+                                                       for r in month.people.values()]
+        self.write([{"range": "'Employee Mapping'!A1", "values": rows}])
+        sheet_id = result["replies"][0]["addSheet"]["properties"]["sheetId"]
+        self.request("POST", ":batchUpdate", json={"requests": [
+            {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                                     "backgroundColor": {"red": 0.85, "green": 0.91, "blue": 0.97}}},
+                            "fields": "userEnteredFormat"}},
+            {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 2},
+                                           "properties": {"pixelSize": 300}, "fields": "pixelSize"}}]})
+
 
 def slack_requests(today, last_day):
     import requests
@@ -268,9 +306,22 @@ def teams_payload(text):
 
 def main():
     mode = os.getenv("RUN_MODE", "preview")
-    if mode not in ("preview", "live"):
-        raise DigestError("RUN_MODE must be preview or live.")
+    if mode not in ("preview", "live", "setup-mapping"):
+        raise DigestError("RUN_MODE must be preview, live or setup-mapping.")
     today = datetime.now(ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))).date()
+    if mode == "setup-mapping":
+        sheets = Sheets()
+        title = today.strftime("%B %Y")
+        max_rows = int(os.getenv("CALENDAR_MAX_ROWS", "500"))
+        if not 2 <= max_rows <= 5000:
+            raise DigestError("CALENDAR_MAX_ROWS must be 2–5000.")
+        rows = sheets.read(title, f"A1:AZ{max_rows}")
+        if len(rows) >= max_rows:
+            raise DigestError("Calendar row limit reached.")
+        sheets.create_mapping(Month(title, rows, today.year, today.month))
+        employee_mapping(sheets.read("Employee Mapping", "A1:B5000"))
+        print("Employee Mapping created with roster names. Fill Slack User IDs in the private tracker.")
+        return
     if os.getenv("SKIP_WEEKENDS", "true").lower() == "true" and today.weekday() >= 5:
         print("Skipped weekend.")
         return
@@ -278,10 +329,8 @@ def main():
     if not 0 <= days <= 90:
         raise DigestError("UPCOMING_DAYS must be 0 (month end) or 1–90.")
     last_day = today + timedelta(days=days) if days else today.replace(day=calendar.monthrange(today.year, today.month)[1])
-    mapping = json.loads(required("EMPLOYEE_MAP_JSON"))
-    if not isinstance(mapping, dict) or any(not isinstance(v, str) or not v.strip() for v in mapping.values()):
-        raise DigestError("EMPLOYEE_MAP_JSON must map Slack user IDs to exact calendar names.")
     sheets = Sheets()
+    mapping = employee_mapping(sheets.read("Employee Mapping", "A1:B5000"))
     months, originals, current = [], {}, today.replace(day=1)
     max_rows = int(os.getenv("CALENDAR_MAX_ROWS", "500"))
     if not 2 <= max_rows <= 5000:
@@ -308,7 +357,7 @@ def main():
     leaves = slack_requests(today, last_day)
     for leave in leaves:
         if leave.user not in mapping:
-            raise DigestError("An active Slack applicant is unmapped; update EMPLOYEE_MAP_JSON privately.")
+            raise DigestError("An active Slack applicant is unmapped; update Employee Mapping in the private tracker.")
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))
     text = make_digest(months, today, last_day)
@@ -332,6 +381,8 @@ def main():
     for month in months:
         if sheets.read(month.title, f"A1:AZ{max_rows}") != originals[month.title]:
             raise DigestError("Calendar changed during the run; retry after reviewing privately.")
+    if employee_mapping(sheets.read("Employee Mapping", "A1:B5000")) != mapping:
+        raise DigestError("Employee Mapping changed during the run; retry after reviewing privately.")
     sheets.write(writes)
     # Reserve before POST. An ambiguous timeout must not cause an automatic duplicate.
     sheets.claim(today, state_row, "pending")

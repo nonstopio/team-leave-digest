@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Preview validates without writes; live updates the tracker and posts to Teams
+        description: Preview validates; setup-mapping creates the mapping tab; live updates and posts
         type: choice
-        options: [preview, live]
+        options: [preview, setup-mapping, live]
         default: preview
   schedule:
     # 06:37 UTC = 12:07 IST. GitHub may delay scheduled runs.
@@ -40,7 +40,6 @@ jobs:
           SLACK_LEAVE_BOT_ID: ${{ secrets.SLACK_LEAVE_BOT_ID }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-          EMPLOYEE_MAP_JSON: ${{ secrets.EMPLOYEE_MAP_JSON }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
           UPCOMING_DAYS: ${{ vars.UPCOMING_DAYS || '0' }}

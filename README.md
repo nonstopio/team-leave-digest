@@ -18,10 +18,11 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `SLACK_LEAVE_BOT_ID` | Optional: source workflow's `bot_id`, not the reader app's ID. Restricts ingestion to that workflow. If omitted, exact-template bot messages in this channel are accepted. |
    | `SPREADSHEET_ID` | Tracker ID from its Google Sheets URL |
    | `GOOGLE_CREDENTIALS_JSON` | Service account key JSON |
-   | `EMPLOYEE_MAP_JSON` | JSON object mapping Slack member IDs to exact tracker names |
    | `TEAMS_WEBHOOK_URL` | Full signed Teams Workflows URL |
 
-   Example mapping with fictional data: `{"U012EXAMPLE": "Sample Employee"}`. In Slack, open a person's profile → More → Copy member ID. Start with the relevant team roster, including anyone with an active unplanned request. Mapping is explicit to avoid guessing between similar names. No `users:read` scope is needed for this version.
+   Employee mappings live in the private tracker, not GitHub secrets. In **Actions → Team leave digest → Run workflow**, choose **setup-mapping** once. This creates an **Employee Mapping** tab with `Slack User ID` and `Tracker Name` columns and prefills names from the current month's roster. It never overwrites an existing mapping tab and never posts to Teams.
+
+   Fill column A with each person's Slack member ID (profile → More → Copy member ID). Column B must match the calendar's exact name. Names without IDs can stay as placeholders, but every active Slack leave applicant needs a mapping before preview/live succeeds. Duplicate IDs, duplicate mapped names, invalid IDs and missing names stop the job. No employee mapping JSON secret or `users:read` scope is required.
 
 5. Set repository **variables** as desired:
 
@@ -39,7 +40,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
 
 ## Preview, then enable
 
-1. Open **Actions → Team leave digest → Run workflow → preview**. It validates access, mapping, dates and conflicts, and prints counts only. It does not write to Sheets or call Teams. A missing credential, unmatched applicant or conflict stops the run without writes.
+1. Create and fill **Employee Mapping** as described above, then open **Actions → Team leave digest → Run workflow → preview**. It validates access, mapping, dates and conflicts, and prints counts only. It does not write to Sheets or call Teams. A missing credential, unmatched applicant or conflict stops the run without writes.
 2. To inspect the actual message privately, run locally in a trusted environment with the same environment variables. Set `RUN_MODE=preview` and `PRIVATE_PREVIEW_PATH=preview.txt`, then `python digest.py`. The file is created with owner-only permissions, excluded from git, and never uploaded. This output option is blocked inside GitHub Actions. Do not paste employee data into public issues, PRs or run logs.
 3. Choose **live** for an initial end-to-end run when ready. This updates only blank cells for current/future requests and posts to Teams. It creates a `Digest State` tab in the tracker to record daily delivery status. Verify the sheet and Teams message privately.
 4. Set `ENABLE_SCHEDULE=true` after verifying the result. Protect the default branch and restrict who can edit workflows or secrets. This privileged workflow runs only on schedule/manual dispatch, not on pull requests. Keep credentials out of third-party PR execution.
