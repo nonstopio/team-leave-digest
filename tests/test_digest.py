@@ -128,16 +128,16 @@ class DigestTests(unittest.TestCase):
         blocks = {b['text']: b for b in content['body'][1:]}
         texts = list(blocks)
         self.assertFalse(any('&amp;' in t or '&#x27;' in t for t in texts))
-        # heading carries a count; entries are bullets (no numbers: Teams clips two-digit list numbers)
+        # heading carries a count; entries are a numbered list
         self.assertIn('Sick/Emergency Leaves (1)', blocks)
-        self.assertIn("- O'Brien & Sons: Sick/Emergency leave", texts)
-        self.assertIn("- O'Brien & Sons: 19th-20th Oct", texts)
-        self.assertFalse(any(t.startswith('1.') for t in texts))
+        self.assertIn("1. O'Brien & Sons: Sick/Emergency leave", texts)
+        self.assertIn("1. O'Brien & Sons: 19th-20th Oct", texts)
+        self.assertFalse(any(t.startswith('- ') for t in texts))
         # empty sections stay visible but quiet
         self.assertEqual(blocks['None']['isSubtle'], True)
         self.assertIn('Half-day Leaves', blocks)
 
-    def test_many_entries_render_as_one_bullet_block_with_overflow_note(self):
+    def test_many_entries_render_as_one_numbered_block_with_overflow_note(self):
         m, today = month(), date(2026, 10, 15)
         m.rows.extend([[''] * m.name_col + [f'Person {i}'] + [''] * 31 for i in range(60)])
         for r in range(1, len(m.rows)):
@@ -146,8 +146,9 @@ class DigestTests(unittest.TestCase):
         blocks = digest_card(make_digest([m], today, today))['attachments'][0]['content']['body']
         texts = [b.get('text', '') for b in blocks]
         self.assertIn('Sick/Emergency Leaves (50)', texts)
-        bullets = next(t for t in texts if t.startswith('- ') and 'Person 5' in t)
-        self.assertEqual(len(bullets.split('\n')), 50)
+        numbered = next(t for t in texts if t.startswith('1. ') and 'Person 5' in t)
+        self.assertEqual(len(numbered.split('\n')), 50)
+        self.assertTrue(numbered.endswith('50. Person 48: Sick/Emergency leave'))
         self.assertIn('...and 11 more', texts)
 
     def test_shadow_roles_are_found_by_header_and_hidden_from_digest(self):
