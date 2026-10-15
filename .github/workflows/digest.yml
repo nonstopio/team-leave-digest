@@ -9,8 +9,8 @@ on:
         options: [preview, live]
         default: preview
   schedule:
-    # 06:37 UTC = 12:07 IST. GitHub may delay scheduled runs.
-    - cron: '37 6 * * 1-5'
+    # 06:00 UTC = 11:30 IST. GitHub may delay scheduled runs by several minutes.
+    - cron: '0 6 * * 1-5'
 
 permissions:
   contents: read

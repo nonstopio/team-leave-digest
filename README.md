@@ -41,7 +41,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `SLACK_LOOKBACK_DAYS` | `90` | Read requests posted in the last 90 days, including multi-day requests still active |
    | `CALENDAR_MAX_ROWS` | `500` | Bounded calendar read; increase if the roster reaches this limit |
 
-   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: **12:07 PM IST, Monday–Friday** (`37 6 * * 1-5`, UTC). Change this to the agreed afternoon time before enabling.
+   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: **11:30 AM IST, Monday–Friday** (`0 6 * * 1-5`, UTC). Leave requests posted after the run appear in the next day's digest.
 
 ## Preview, then enable
 
