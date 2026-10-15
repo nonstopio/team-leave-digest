@@ -507,10 +507,11 @@ def run():
     writes = []
     leaves = slack_requests(today, last_day)
     # Full-day SL first, so a same-day half-day request is covered by it instead of conflicting.
-    unmapped = sorted({leave.user for leave in leaves if leave.user not in mapping})
-    if unmapped:  # Report every missing ID at once so one fix covers them all.
-        raise DigestError(f"{len(unmapped)} active Slack applicant(s) are unmapped; update Employee Mapping in the private tracker.",
-                          "conflict", "Slack user IDs: " + ", ".join(unmapped))
+    # The channel covers people outside this team: only mapped applicants are processed.
+    ignored = {leave.user for leave in leaves if leave.user not in mapping}
+    if ignored:
+        print(f"{len(ignored)} Slack applicant(s) with active requests are not in Employee Mapping and were ignored.")
+    leaves = [leave for leave in leaves if leave.user in mapping]
     for leave in sorted(leaves, key=lambda l: l.code != "SL"):
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))

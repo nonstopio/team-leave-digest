@@ -336,27 +336,34 @@ class MainTests(unittest.TestCase):
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
 
+    @staticmethod
+    def pl_today(rows):
+        col = [i for i, v in enumerate(rows[0]) if v == (date(2026, 10, 15) - date(1899, 12, 30)).days][0]
+        rows[1][col] = 'PL'  # existing planned leave on the day Slack says sick -> conflict
+
     def test_conflict_alerts_owners_only(self):
-        sl = Leave('U123', date(2026, 10, 15), date(2026, 10, 15), 'SL')
-        sheets, post, error = self.run_job('live', leaves=[sl, Leave('U999', sl.start, sl.end, 'SL')])
+        sheets, post, error = self.run_job('live', rows_edit=self.pl_today)
         self.assertEqual(error.kind, 'conflict')
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
         body = str(post.call_args.kwargs['json'])
         self.assertIn('NOT sent', body)
-        self.assertIn('Slack user IDs: U999', body)  # details reach the owners' channel only
-        self.assertNotIn('U999', str(error))    # ...never the public message/log line
+        self.assertIn('Sample Employee, 15 Oct 2026: tracker has PL, Slack requested SL', body)  # owners' channel only
+        self.assertNotIn('Sample Employee', str(error))  # ...never the public message/log line
 
-    def test_every_unmapped_applicant_is_reported_at_once(self):
+    def test_applicants_outside_the_team_are_ignored_not_fatal(self):
         day = date(2026, 10, 15)
-        leaves = [Leave(u, day, day, 'SL') for u in ('U123', 'U777', 'U555', 'U777')]
-        sheets, post, error = self.run_job('live', leaves=leaves)
-        self.assertIn('2 active Slack applicant(s)', str(error))
-        self.assertEqual(error.detail, 'Slack user IDs: U555, U777')
-        sheets.write.assert_not_called()
+        leaves = [Leave('U123', day, day, 'SL'), Leave('U777', day, day, 'SL'), Leave('U555', day, day, 'HD')]
+        with patch('builtins.print') as out:
+            sheets, post, error = self.run_job('live', leaves=leaves)
+        self.assertIsNone(error)
+        (writes,) = sheets.write.call_args.args
+        self.assertEqual(len(writes), 1)  # only the mapped employee's cell
+        self.assertTrue(any('2 Slack applicant(s)' in str(c.args) for c in out.call_args_list))
+        self.assertEqual(self.posted(post), ['leadership'])
 
     def test_preview_never_alerts(self):
-        _, post, error = self.run_job('preview', leaves=[Leave('U999', date(2026, 10, 15), date(2026, 10, 15), 'SL')])
+        _, post, error = self.run_job('preview', rows_edit=self.pl_today)
         self.assertIsInstance(error, DigestError)
         post.assert_not_called()
 
