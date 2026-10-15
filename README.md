@@ -49,7 +49,7 @@ If the workflow is not visible yet, it must first exist on the default branch. A
 
 ## Calendar and request format
 
-Monthly tabs must be named `October 2026`, `November 2026`, etc. Row 1 contains exactly one `Name` header and every real date of that month as native spreadsheet date values. Names and calendar codes must be literal values; formulas in those cells fail validation rather than risking an overwrite. Other roster columns may precede the dates and may shift between months. Dates and names are found from headers, never fixed column positions. The read is bounded to `A1:AZ{CALENDAR_MAX_ROWS}`; keep the roster within that rectangle.
+Monthly tabs must be named `October 2026`, `November 2026`, etc. Row 1 contains exactly one `Name` header and every real date of that month as native spreadsheet date values. Names may be master-linked formulas: the job reads their evaluated values for employee matching. Leave-code cells must remain literal values; formulas there fail validation rather than risking an overwrite. A blank or failed name lookup stops the job. Other roster columns may precede the dates and may shift between months. Dates and names are found from headers, never fixed column positions. The read is bounded to `A1:AZ{CALENDAR_MAX_ROWS}`; keep the roster within that rectangle.
 
 Recognized calendar codes: `PL` planned, `SL` sick/emergency, `HD` half day, `HL` holiday, `WK` weekend. `CPL` is excluded. Existing nonblank conflicting entries are never overwritten. A request covering a `WK`/`HL` cell leaves that cell unchanged.
 

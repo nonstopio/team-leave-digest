@@ -98,7 +98,7 @@ def parse_request(message):
 
 
 class Month:
-    def __init__(self, title, rows, year, month):
+    def __init__(self, title, rows, year, month, evaluated=None):
         self.title, self.rows = title, rows
         if not rows:
             raise DigestError("A required monthly calendar is empty.")
@@ -118,13 +118,21 @@ class Month:
             raise DigestError("Calendar date headers are missing or not real spreadsheet dates.")
         self.people = {}
         for r, row in enumerate(rows[1:], 1):
+            if str(cell(row, self.name_col)).startswith("="):
+                if evaluated is None or r >= len(evaluated):
+                    raise DigestError("Formula-derived names require evaluated spreadsheet values.")
+                name_value = cell(evaluated[r], self.name_col)
+                if (not isinstance(name_value, str) or not name_value.strip()
+                        or name_value.startswith(("#", "=")) or name_value == "MISSING IN MASTER"):
+                    raise DigestError("A formula-derived calendar name is blank or invalid; check the master mapping.")
+                row[self.name_col] = name_value
             name = normalized(cell(row, self.name_col))
             if not name:
                 continue
             if name in self.people:
                 raise DigestError("Duplicate employee names in a monthly calendar.")
             if name.startswith("=") or any(str(cell(row, c)).startswith("=") for c in self.dates.values()):
-                raise DigestError("Formula-driven roster or calendar cells are unsupported; use literal values.")
+                raise DigestError("Formula-driven leave cells are unsupported; use literal leave codes.")
             self.people[name] = r
 
     def code(self, row, day):
@@ -212,11 +220,11 @@ class Sheets:
             raise DigestError("Google Sheets API failed; check sharing, credentials, and calendar configuration.")
         return response.json()
 
-    def read(self, title, area):
+    def read(self, title, area, render="FORMULA"):
         if title not in self.titles:
             raise DigestError("A required sheet tab is missing.")
         return self.request("GET", "/values/" + quote(f"{sheet_ref(title)}!{area}", safe=""),
-                            params={"valueRenderOption": "FORMULA", "dateTimeRenderOption": "SERIAL_NUMBER"}).get("values", [])
+                            params={"valueRenderOption": render, "dateTimeRenderOption": "SERIAL_NUMBER"}).get("values", [])
 
     def write(self, writes):
         if writes:
@@ -341,7 +349,12 @@ def main():
         originals[title] = json.loads(json.dumps(rows))
         if len(rows) >= max_rows:
             raise DigestError("Calendar row limit reached; increase CALENDAR_MAX_ROWS.")
-        months.append(Month(title, rows, current.year, current.month))
+        headers = [normalized(x) for x in rows[0]] if rows else []
+        name_col = headers.index("name") if "name" in headers else None
+        evaluated = None
+        if name_col is not None and any(str(cell(row, name_col)).startswith("=") for row in rows[1:]):
+            evaluated = sheets.read(title, f"A1:AZ{max_rows}", render="UNFORMATTED_VALUE")
+        months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
     this_month = months[0]
     if os.getenv("SKIP_HOLIDAYS", "true").lower() == "true":

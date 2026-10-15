@@ -74,6 +74,23 @@ class DigestTests(unittest.TestCase):
         with self.assertRaises(DigestError):
             Month(m.title, m.rows, 2026, 10)
 
+    def test_master_linked_name_uses_evaluated_value(self):
+        m = month()
+        evaluated = copy.deepcopy(m.rows)
+        m.rows[1][m.name_col] = '=XLOOKUP(AI2,Master!A:A,Master!B:B)'
+        linked = Month(m.title, m.rows, 2026, 10, evaluated=evaluated)
+        self.assertEqual(linked.people, {'sample employee': 1})
+        self.assertEqual(linked.rows[1][linked.name_col], 'Sample Employee')
+
+    def test_unresolved_master_name_fails(self):
+        for value in ['', '#N/A', 'MISSING IN MASTER']:
+            m = month()
+            evaluated = copy.deepcopy(m.rows)
+            m.rows[1][m.name_col] = '=XLOOKUP(AI2,Master!A:A,Master!B:B)'
+            evaluated[1][m.name_col] = value
+            with self.assertRaises(DigestError):
+                Month(m.title, m.rows, 2026, 10, evaluated=evaluated)
+
     def test_summary_ignores_cancelled_and_groups_exact_dates(self):
         m, today = month(), date(2026, 10, 15)
         for day, code in [(15, 'SL'), (19, 'PL'), (20, 'HL'), (21, 'PL'), (22, 'CPL')]:
