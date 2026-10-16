@@ -10,10 +10,11 @@ on:
         default: preview
   schedule:
     # GitHub delays or drops scheduled runs, worst at the top of the hour, so no cron uses :00 or :30.
-    # Primary run 05:47 UTC = 11:17 IST. The backup 06:17 UTC = 11:47 IST is harmless when the primary
-    # worked: today's digest is already accepted, so it skips.
-    - cron: '47 5 * * 1-5'
-    - cron: '17 6 * * 1-5'
+    # Primary run 05:57 UTC = 11:27 IST, so a typical few-minute delay lands it at about 11:30 IST.
+    # The backup 06:23 UTC = 11:53 IST is harmless when the primary worked: today's digest is already
+    # accepted, so it skips.
+    - cron: '57 5 * * 1-5'
+    - cron: '23 6 * * 1-5'
     # 07:17 UTC = 12:47 IST: read-only check that today's digest was accepted; alerts the owners if not.
     - cron: '17 7 * * 1-5'
 
