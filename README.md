@@ -42,7 +42,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `SLACK_LOOKBACK_DAYS` | `90` | Read requests posted in the last 90 days, including multi-day requests still active |
    | `CALENDAR_MAX_ROWS` | `500` | Bounded calendar read; increase if the roster reaches this limit |
 
-   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: **11:30 AM IST, Monday–Friday** (`0 6 * * 1-5`, UTC). Leave requests posted after the run appear in the next day's digest.
+   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: **11:17 AM IST, Monday–Friday** (`47 5 * * 1-5`, UTC), with a backup at **11:47 AM IST** (`17 6 * * 1-5`) that skips if the first already posted. GitHub delays or drops scheduled runs, most at the top of the hour, so the crons avoid `:00` and `:30`; a run can still start many minutes late. Leave requests posted after the run appear in the next day's digest.
 
 ## Preview, then enable
 
@@ -72,7 +72,7 @@ The leadership card has a shaded title (`Leaves: 15th October 2026`) and one bol
 
 ## Failure and conflict alerts
 
-A second scheduled run at **12:30 IST** (`verify`) is read-only: it checks that today's digest is `accepted` in `Digest State` and alerts the owners if not (skipping weekends and holidays). It catches a scheduled run that never started, which nothing else can see.
+A third scheduled run at **12:47 IST** (`verify`) is read-only: it checks that today's digest is `accepted` in `Digest State` and alerts the owners if not (skipping weekends and holidays). It catches a scheduled run that never started, which nothing else can see.
 
 In live mode, if the run cannot safely produce a correct digest, **nothing is posted to leadership** and a card is posted to `ALERT_WEBHOOK_URL` instead. The job still exits 1. The alert names the offending record (employee, date and codes, or the Slack message ts and user ID, never message text), so **the alert channel must be private to the owners and must never be the leadership channel**. Those details appear only in the alert card, never in Actions logs or the leadership message. Previews and expected skips (weekend, holiday, already sent) do not alert. A final workflow step alerts when the job fails before `digest.py` can (install, tests, crash).
 
@@ -81,7 +81,7 @@ In live mode, if the run cannot safely produce a correct digest, **nothing is po
 | Conflict | Conflicting calendar cell, unsupported Slack format, bad date | Fix Slack or the tracker privately, then re-run. A stuck conflict alerts every run until fixed. |
 | Config | Sheets/Slack access, missing month tab, bad variable, webhook rejected | Fix the configuration, then re-run. Create next month's tab before the 1st working day. |
 | Stale | Calendar or mapping edited during the run | Safe to re-run. |
-| Missing digest | The 12:30 IST check found no accepted digest for today: the 11:30 run may not have started, failed, or is still running | Check the Actions run history and the leadership channel first, then run `live` manually if needed. |
+| Missing digest | The 12:47 IST check found no accepted digest for today: the 11:17 and 11:47 runs may not have started, failed, or is still running | Check the Actions run history and the leadership channel first, then run `live` manually if needed. |
 | Heads-up | From the 24th on: next month's calendar tab does not exist yet. The digest still runs. | Create the tab before the first working day; the heads-up repeats daily until you do. |
 | Delivery needs review | Teams outcome unknown (timeout), a state write failed, or a re-run found today's state `pending`/unrecognised | Check the leadership channel and Power Automate history **before** clearing today's `Digest State` row. |
 

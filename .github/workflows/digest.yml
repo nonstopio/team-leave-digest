@@ -9,10 +9,13 @@ on:
         options: [preview, live]
         default: preview
   schedule:
-    # 06:00 UTC = 11:30 IST. GitHub may delay scheduled runs by several minutes.
-    - cron: '0 6 * * 1-5'
-    # 07:00 UTC = 12:30 IST: read-only check that today's digest was accepted; alerts the owners if not.
-    - cron: '0 7 * * 1-5'
+    # GitHub delays or drops scheduled runs, worst at the top of the hour, so no cron uses :00 or :30.
+    # Primary run 05:47 UTC = 11:17 IST. The backup 06:17 UTC = 11:47 IST is harmless when the primary
+    # worked: today's digest is already accepted, so it skips.
+    - cron: '47 5 * * 1-5'
+    - cron: '17 6 * * 1-5'
+    # 07:17 UTC = 12:47 IST: read-only check that today's digest was accepted; alerts the owners if not.
+    - cron: '17 7 * * 1-5'
 
 permissions:
   contents: read
@@ -37,7 +40,7 @@ jobs:
         id: digest
         run: python digest.py
         env:
-          RUN_MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '0 7 * * 1-5' && 'verify' || 'live') || inputs.mode }}
+          RUN_MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '17 7 * * 1-5' && 'verify' || 'live') || inputs.mode }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_LEAVE_BOT_ID: ${{ secrets.SLACK_LEAVE_BOT_ID }}
