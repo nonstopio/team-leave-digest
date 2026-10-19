@@ -2,7 +2,7 @@
 
 A configurable GitHub Actions job that reads structured Slack leave requests, marks current/future sick or half-day leave in a monthly Google Sheets calendar, and sends a daily Adaptive Card to Teams. No AI service is required. Copy the repository and supply your own configuration to reuse it.
 
-**The schedule is disabled until `ENABLE_SCHEDULE=true` is set. Manual runs default to preview. No live credentials or employee records belong in this repository.**
+**The schedule runs automatically once the workflow is on the default branch. Manual runs default to preview. No live credentials or employee records belong in this repository.**
 
 ## Setup
 
@@ -33,7 +33,6 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
 
    | Variable | Default | Meaning |
    | --- | --- | --- |
-   | `ENABLE_SCHEDULE` | unset | Set to `true` only after preview and a successful live test |
    | `TIMEZONE` | `Asia/Kolkata` | Timezone for dates; changing this does not change cron |
    | `UPCOMING_DAYS` | `0` | 0 = rest of month; 1–90 = rolling calendar days, loading subsequent monthly tabs |
    | `UPCOMING_MIN_DAYS` | `14` | With `UPCOMING_DAYS=0`, the window runs to month end or this many days ahead, whichever is later, so the last days of a month still show next month's leaves. If next month's tab is missing or invalid, the digest falls back to month end and the alert channel gets a heads-up. `0` keeps month end only. Ignored when `UPCOMING_DAYS` is set. |
@@ -42,14 +41,14 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `SLACK_LOOKBACK_DAYS` | `90` | Read requests posted in the last 90 days, including multi-day requests still active |
    | `CALENDAR_MAX_ROWS` | `500` | Bounded calendar read; increase if the roster reaches this limit |
 
-   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: about **11:30 AM IST, Monday–Friday**: the primary run is scheduled at 11:27 IST (`57 5 * * 1-5`, UTC) so a typical few-minute GitHub delay lands it near 11:30, with a backup at **11:53 AM IST** (`23 6 * * 1-5`) that skips if the first already posted. GitHub delays or drops scheduled runs, most at the top of the hour, so the crons avoid `:00` and `:30`; a run can still start many minutes late. Leave requests posted after the run appear in the next day's digest.
+   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: about **11:30 AM IST, Monday–Friday**: the primary run is scheduled at 11:28 IST (`58 5 * * 1-5`, UTC) so a typical few-minute GitHub delay lands it near 11:30, with a backup at **11:54 AM IST** (`24 6 * * 1-5`) that skips if the first already posted. GitHub delays or drops scheduled runs, most at the top of the hour, so the crons avoid `:00` and `:30`; a run can still start many minutes late. Leave requests posted after the run appear in the next day's digest.
 
 ## Preview, then enable
 
 1. Make sure the **Employee Mapping** tab exists and is filled as described above, then open **Actions → Team leave digest → Run workflow → preview**. It validates access, mapping, dates and conflicts, and prints counts only. It does not write to Sheets or call Teams. A missing credential, unmatched applicant or conflict stops the run without writes.
 2. To inspect the actual message privately, run locally in a trusted environment with the same environment variables. Set `RUN_MODE=preview` and `PRIVATE_PREVIEW_PATH=preview.txt`, then `python digest.py`. The file is created with owner-only permissions, excluded from git, and never uploaded. This output option is blocked inside GitHub Actions. Do not paste employee data into public issues, PRs or run logs.
 3. Choose **live** for an initial end-to-end run when ready. This updates only blank cells for current/future requests and posts to Teams. It creates a `Digest State` tab in the tracker to record daily delivery status. Verify the sheet and Teams message privately.
-4. Set `ENABLE_SCHEDULE=true` after verifying the result. Protect the default branch and restrict who can edit workflows or secrets. This privileged workflow runs only on schedule/manual dispatch, not on pull requests. Keep credentials out of third-party PR execution.
+4. The schedule starts as soon as this is merged, so verify the result first. To pause it, disable the workflow in the Actions tab. Protect the default branch and restrict who can edit workflows or secrets. This privileged workflow runs only on schedule/manual dispatch, not on pull requests. Keep credentials out of third-party PR execution.
 
 If the workflow is not visible yet, it must first exist on the default branch. A fork receives code, not the original repository's secret values; each team must configure its own credentials and tracker.
 
@@ -72,7 +71,7 @@ The leadership card has a shaded title (`Leaves: 15th October 2026`) and one bol
 
 ## Failure and conflict alerts
 
-A third scheduled run at **12:47 IST** (`verify`) is read-only: it checks that today's digest is `accepted` in `Digest State` and alerts the owners if not (skipping weekends and holidays). It catches a scheduled run that never started, which nothing else can see.
+A third scheduled run at **12:48 IST** (`verify`) is read-only: it checks that today's digest is `accepted` in `Digest State` and alerts the owners if not (skipping weekends and holidays). It catches a scheduled run that never started, which nothing else can see.
 
 In live mode, if the run cannot safely produce a correct digest, **nothing is posted to leadership** and a card is posted to `ALERT_WEBHOOK_URL` instead. The job still exits 1. The alert names the offending record (employee, date and codes, or the Slack message ts and user ID, never message text), so **the alert channel must be private to the owners and must never be the leadership channel**. Those details appear only in the alert card, never in Actions logs or the leadership message. Previews and expected skips (weekend, holiday, already sent) do not alert. A final workflow step alerts when the job fails before `digest.py` can (install, tests, crash).
 
@@ -81,7 +80,7 @@ In live mode, if the run cannot safely produce a correct digest, **nothing is po
 | Conflict | Conflicting calendar cell, unsupported Slack format, bad date | Fix Slack or the tracker privately, then re-run. A stuck conflict alerts every run until fixed. |
 | Config | Sheets/Slack access, missing month tab, bad variable, webhook rejected | Fix the configuration, then re-run. Create next month's tab before the 1st working day. |
 | Stale | Calendar or mapping edited during the run | Safe to re-run. |
-| Missing digest | The 12:47 IST check found no accepted digest for today: the 11:27 and 11:53 runs may not have started, failed, or is still running | Check the Actions run history and the leadership channel first, then run `live` manually if needed. |
+| Missing digest | The 12:48 IST check found no accepted digest for today: the 11:28 and 11:54 runs may not have started, failed, or is still running | Check the Actions run history and the leadership channel first, then run `live` manually if needed. |
 | Heads-up | From the 24th on: next month's calendar tab does not exist yet. The digest still runs. | Create the tab before the first working day; the heads-up repeats daily until you do. |
 | Delivery needs review | Teams outcome unknown (timeout), a state write failed, or a re-run found today's state `pending`/unrecognised | Check the leadership channel and Power Automate history **before** clearing today's `Digest State` row. |
 
