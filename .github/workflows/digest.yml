@@ -10,13 +10,13 @@ on:
         default: preview
   schedule:
     # GitHub delays or drops scheduled runs, worst at the top of the hour, so no cron uses :00 or :30.
-    # Primary run 05:57 UTC = 11:27 IST, so a typical few-minute delay lands it at about 11:30 IST.
-    # The backup 06:23 UTC = 11:53 IST is harmless when the primary worked: today's digest is already
+    # Primary run 05:58 UTC = 11:28 IST, so a typical few-minute delay lands it at about 11:30 IST.
+    # The backup 06:24 UTC = 11:54 IST is harmless when the primary worked: today's digest is already
     # accepted, so it skips.
-    - cron: '57 5 * * 1-5'
-    - cron: '23 6 * * 1-5'
-    # 07:17 UTC = 12:47 IST: read-only check that today's digest was accepted; alerts the owners if not.
-    - cron: '17 7 * * 1-5'
+    - cron: '58 5 * * 1-5'
+    - cron: '24 6 * * 1-5'
+    # 07:18 UTC = 12:48 IST: read-only check that today's digest was accepted; alerts the owners if not.
+    - cron: '18 7 * * 1-5'
 
 permissions:
   contents: read
@@ -27,7 +27,6 @@ concurrency:
 
 jobs:
   digest:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -41,7 +40,7 @@ jobs:
         id: digest
         run: python digest.py
         env:
-          RUN_MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '17 7 * * 1-5' && 'verify' || 'live') || inputs.mode }}
+          RUN_MODE: ${{ github.event_name == 'schedule' && (github.event.schedule == '18 7 * * 1-5' && 'verify' || 'live') || inputs.mode }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_LEAVE_BOT_ID: ${{ secrets.SLACK_LEAVE_BOT_ID }}
