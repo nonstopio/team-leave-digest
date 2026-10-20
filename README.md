@@ -41,7 +41,7 @@ A configurable GitHub Actions job that reads structured Slack leave requests, ma
    | `SLACK_LOOKBACK_DAYS` | `90` | Read requests posted in the last 90 days, including multi-day requests still active |
    | `CALENDAR_MAX_ROWS` | `500` | Bounded calendar read; increase if the roster reaches this limit |
 
-   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: about **11:30 AM IST, Monday–Friday**: the primary run is scheduled at 11:28 IST (`58 5 * * 1-5`, UTC) so a typical few-minute GitHub delay lands it near 11:30, with a backup at **11:54 AM IST** (`24 6 * * 1-5`) that skips if the first already posted. GitHub delays or drops scheduled runs, most at the top of the hour, so the crons avoid `:00` and `:30`; a run can still start many minutes late. Leave requests posted after the run appear in the next day's digest.
+   Sensitive identifiers can stay in secrets. Timezone/range/weekend variables are intentionally non-sensitive. Posting time is the cron expression in `.github/workflows/digest.yml`, because GitHub schedule expressions cannot reference repository variables. Default: about **11:30 AM IST, Monday–Friday**: the primary run is scheduled at 11:28 IST (`58 5 * * 1-5`, UTC) so a typical few-minute GitHub delay lands it near 11:30, with a backup at **11:54 AM IST** (`24 6 * * 1-5`) that skips if the first already posted. GitHub delays or drops scheduled runs, most at the top of the hour, so the crons avoid `:00` and `:30`; a run can still start hours late or be dropped, which is why the external trigger above is the primary start. Leave requests posted after the run appear in the next day's digest.
 
 ## Preview, then enable
 
@@ -68,6 +68,21 @@ Applied on Keka: NO
 `Half Day` is also accepted. Formatting asterisks are tolerated. Keka application status does not determine availability. The mentioned member is the applicant, not the bot sender. The source combines sick/emergency, so the digest preserves that combined label. Existing `HD` cells do not encode planned versus unplanned; the summary gives them a separate half-day section without guessing. Leave reasons such as paternity are not inferred from `PL`.
 
 The leadership card has a shaded title (`Leaves: 15th October 2026`) and one bold heading with a count per section, with numbered entries and dates like `19th-30th Oct`. Empty sections show a quiet "None". The summary lists holidays from today through the configured horizon, today's planned/sick/half-day entries, and future planned dates. It compresses consecutive dates but preserves holiday/weekend gaps. Current planned entries show today's date rather than reconstructing a leave period that began before the reporting window.
+
+## External trigger (recommended)
+
+GitHub's own `schedule` cron has started this workflow hours late (one run was 7 hours 22 minutes late) or not at all, and GitHub documents that scheduled runs can be delayed or dropped under load. So a Google Apps Script starts the workflow on time instead, using GitHub's workflow-dispatch API. The GitHub cron above stays as a free backup; a second start is harmless because the job skips a day that was already sent.
+
+`apps-script/trigger.gs` runs on weekdays: `runLive` at about **11:30 IST** (starts `live`) and `runVerify` at about **12:45 IST** (starts the read-only `verify` check). Apps Script fires within roughly 15 minutes either side of the time. If the call to GitHub fails (bad or expired token, GitHub unreachable), it **emails the script owner**, independently of GitHub and Teams.
+
+Setup (about 5 minutes):
+
+1. **Create a GitHub token.** Account Settings → Developer settings → Fine-grained personal access tokens → Generate. Resource owner `nonstopio`, repository access **only** `team-leave-digest`, permission **Repository → Actions: Read and write**. Choose the longest expiry and put the expiry date in a calendar; the script emails you when the token stops working. The token acts as its owner, so prefer a shared or service account. The organisation may need to approve the token. (A classic token with the `repo` and `workflow` scopes also works.)
+2. **Create the script.** At script.google.com make a new project and paste `apps-script/trigger.gs`. Under Project Settings → Script properties add `GITHUB_TOKEN` with the token. Never put the token in the code or in this repository.
+3. **Test safely.** Run `testPreview` once and approve the permissions it asks for (external requests, sending mail, triggers). A `preview` run should start within seconds in the repository's Actions tab. It writes and posts nothing.
+4. **Install the triggers.** Run `installTriggers` once. The Triggers page should now list `runLive` (daily, about 11:30) and `runVerify` (daily, about 12:45) in the Asia/Kolkata timezone. Running it again replaces them rather than adding duplicates.
+
+Manual runs offer three modes: `preview` (validates only), `live` (updates the sheet and posts) and `verify` (checks that today's digest was sent and alerts the owners if not).
 
 ## Failure and conflict alerts
 

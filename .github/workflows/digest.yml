@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Preview validates only; live updates the sheet and posts
+        description: Preview validates only; live updates the sheet and posts; verify only checks that today's digest was sent
         type: choice
-        options: [preview, live]
+        options: [preview, live, verify]
         default: preview
   schedule:
     # GitHub delays or drops scheduled runs, worst at the top of the hour, so no cron uses :00 or :30.
@@ -57,7 +57,7 @@ jobs:
           CALENDAR_MAX_ROWS: ${{ vars.CALENDAR_MAX_ROWS || '500' }}
       # Backstop for failures before digest.py could alert (install, tests, crash, timeout/cancel).
       - name: Alert owners on early failure
-        if: always() && steps.digest.outcome != 'success' && (github.event_name == 'schedule' || inputs.mode == 'live') && steps.digest.outputs.alerted != 'true'
+        if: always() && steps.digest.outcome != 'success' && (github.event_name == 'schedule' || inputs.mode == 'live' || inputs.mode == 'verify') && steps.digest.outputs.alerted != 'true'
         continue-on-error: true
         env:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
