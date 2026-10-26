@@ -234,6 +234,12 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn('Sample Employee', str(ctx.exception))
         self.assertEqual(ctx.exception.detail, 'Sample Employee, 15 Oct 2026: tracker has PL, Slack requested SL')
 
+    def test_personal_work_is_ignored(self):
+        for duration in ('Half Day', 'Full Day'):
+            msg = {'bot_id': 'B1', 'ts': '1', 'text':
+                   f'<@U1|Rushi> applied a *Unplanned - Personal Work* from 2026-10-26 to 2026-10-26. {duration}\n\nApplied on Keka: YES'}
+            self.assertIsNone(parse_request(msg, date(2026, 10, 26)))
+
     def test_unparseable_request_is_skipped_only_when_provably_over(self):
         today = date(2026, 10, 15)
         def msg(text):
