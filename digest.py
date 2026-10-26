@@ -139,6 +139,9 @@ REQUEST = re.compile(
 )
 
 
+# Recognised Slack leave types that are not sick/emergency leave and never reach the calendar.
+IGNORED = re.compile(r"applied a\s+Unplanned\s*[-–]\s*Personal Work\b", re.I)
+
 RANGE = re.compile(r"\bfrom\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})\b", re.I)
 
 
@@ -171,6 +174,8 @@ def parse_request(message, today=None):
 
     match = REQUEST.search(text)
     if not match:
+        if IGNORED.search(text):
+            return None
         if "unplanned" in text.casefold() and "applied a" in text.casefold():
             return reject("A leave workflow request has an unsupported format",
                           f"Slack message ts {ts}, user {message.get('user', '?')}")
