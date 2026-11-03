@@ -287,51 +287,100 @@ def date_list(days):
 
 
 KNOWN_CODES = {"SL", "HD", "PL", "HL", "WK", "CPL"}
-MAX_ITEMS = 50
+MAX_ITEMS = 50  # rows per card table; digest_card lowers it until the card fits MAX_CARD_BYTES
 MAX_CARD_BYTES = 24000  # Teams Workflows webhooks reject messages of roughly 28 KB and over.
+WINDOW = 5  # Upcoming Leaves shows two windows of this many working days each
 
 
-def make_digest(months, today, last_day, hidden=frozenset(), teams=None):
-    sections = {"Upcoming Holidays": [], "Sick/Emergency Leaves": [], "Half-day Leaves": [],
-                "Planned Leaves": [], "Upcoming Leaves": [], "Other Entries": []}
-    holidays, planned = set(), {}
+def holidays(months, hidden=frozenset()):
+    """Company holidays: days every visible roster row marks HL (the rule SKIP_HOLIDAYS uses).
+
+    A lone HL (e.g. one person's regional holiday) must not turn the day off for everyone and hide their leave.
+    """
+    out = set()
+    for m in months:
+        rows = [r for name, r in m.people.items() if name not in hidden]
+        out |= {d for d in m.dates if rows and all(m.code(r, d) == "HL" for r in rows)}
+    return out
+
+
+def working_days(months, today, hidden=frozenset()):
+    """The next 2*WINDOW weekdays after today that are not holidays, within the loaded tabs.
+
+    Fewer than 2*WINDOW means the loaded tabs end first (the caller loads more, or the next tab is missing).
+    """
+    off = holidays(months, hidden)
+    return sorted(d for m in months for d in m.dates if d > today and d.weekday() < 5 and d not in off)[:2 * WINDOW]
+
+
+def make_digest(months, today, hidden=frozenset(), teams=None):
+    """Structured digest: person rows are (name, team, detail); team is "" when unknown.
+
+    Upcoming Leaves lists only PL on working days of each window, so a PL on a weekend or holiday is ignored.
+    """
+    days = working_days(months, today, hidden)
+    windows = [days[:WINDOW], days[WINDOW:]]
+    end = days[-1] if len(days) == 2 * WINDOW else max(d for m in months for d in m.dates)
+    sections = {"Sick/Emergency Leaves": [], "Half-day Leaves": [], "Planned Leaves": [], "Other Entries": []}
+    upcoming = [{}, {}]
     for month in months:
         for name, r in month.people.items():
             if name in hidden:
                 continue
-            display = " ".join(str(cell(month.rows[r], month.name_col)).split())  # a stray newline must not split the card
-            if (teams or {}).get(name):
-                display = f"{display} ({teams[name]})"
+            person = (" ".join(str(cell(month.rows[r], month.name_col)).split()),  # a stray newline must not split the card
+                      (teams or {}).get(name, ""))
             for day in month.dates:
                 code = month.code(r, day)
-                if today <= day <= last_day and code == "HL":
-                    holidays.add(day)
                 if day == today:
                     if code == "SL":
-                        sections["Sick/Emergency Leaves"].append(f"{display}: Sick/Emergency leave")
+                        sections["Sick/Emergency Leaves"].append((*person, "Sick/Emergency leave"))
                     elif code == "HD":
                         # HD alone does not encode whether the leave was planned.
-                        sections["Half-day Leaves"].append(f"{display}: Half day (type unspecified in tracker)")
+                        sections["Half-day Leaves"].append((*person, "Half day (type unspecified in tracker)"))
                     elif code == "PL":
-                        sections["Planned Leaves"].append(f"{display}: {ordinal(day.day)} {day:%b}")
+                        sections["Planned Leaves"].append((*person, f"{ordinal(day.day)} {day:%b}"))
                     elif code and code not in KNOWN_CODES:
                         # Never drop an entry leadership might need; show it unclassified.
                         # Show only a short code; free text in a cell (e.g. a private note) must not reach leadership.
                         shown = code if re.fullmatch(r"[A-Z]{1,6}", code) else "unrecognized entry"
-                        sections["Other Entries"].append(f"{display}: {shown} (unrecognized code)")
-                if today < day <= last_day and code == "PL":
-                    planned.setdefault(display, []).append(day)
-    sections["Upcoming Holidays"] = [f"{d:%A, %B} {d.day}, {d.year}" for d in sorted(holidays)]
-    sections["Upcoming Leaves"] = [f"{name}: {date_list(days)}" for name, days in sorted(planned.items())]
-    lines = [f"Leaves: {ordinal(today.day)} {today:%B %Y}"]
-    for title, items in sections.items():
-        if title == "Other Entries" and not items:
-            continue
-        lines.extend(["", title + ":"])
-        shown = [f"{i}. {item}" for i, item in enumerate(items[:MAX_ITEMS], 1)]
-        if len(items) > MAX_ITEMS:
-            shown.append(f"...and {len(items) - MAX_ITEMS} more")
-        lines.extend(shown or ["None"])
+                        sections["Other Entries"].append((*person, f"{shown} (unrecognized code)"))
+                if code == "PL":
+                    for planned, window in zip(upcoming, windows):
+                        if day in window:
+                            planned.setdefault(person, []).append(day)
+    if not sections["Other Entries"]:
+        del sections["Other Entries"]
+    return {"title": f"Leaves: {ordinal(today.day)} {today:%B %Y}",
+            "holidays": [f"{d:%A, %B} {d.day}, {d.year}" for d in sorted(holidays(months, hidden)) if today < d <= end],
+            "sections": [(title, sorted(rows)) for title, rows in sections.items()],
+            "windows": [(window, [(*person, date_list(ds)) for person, ds in sorted(planned.items())])
+                        for window, planned in zip(windows, upcoming)]}
+
+
+WINDOW_TITLES = (f"Upcoming Leaves · next {WINDOW} working days", f"Following {WINDOW} working days")
+
+
+def span(days):
+    """'Wed 4 Nov – Wed 11 Nov'; a short window means the calendar ran out (next month's tab is missing)."""
+    if not days:
+        return "Not covered: next month's calendar tab is missing"
+    text = " – ".join(f"{d:%a} {d.day} {d:%b}" for d in (days[0], days[-1]))
+    return text if len(days) == WINDOW else f"{text} (calendar ends here: next month's tab is missing)"
+
+
+def digest_text(digest):
+    """Plain-text rendering of the same digest, for the private preview file."""
+    def listing(items):
+        return [f"{i}. {item}" for i, item in enumerate(items, 1)] or ["None"]
+
+    def people(rows):
+        return listing(f"{name} ({team}): {detail}" if team else f"{name}: {detail}" for name, team, detail in rows)
+
+    lines = [digest["title"], "", "Upcoming Holidays:", *listing(digest["holidays"])]
+    for title, rows in digest["sections"]:
+        lines += ["", title + ":", *people(rows)]
+    for title, (days, rows) in zip(WINDOW_TITLES, digest["windows"]):
+        lines += ["", f"{title} ({span(days)}):", *people(rows)]
     return "\n".join(lines)
 
 
@@ -457,32 +506,87 @@ def build_card(title, style, text, link=None):
                                                 "contentUrl": None, "content": card}]}
 
 
-def digest_card(text):
-    """Leadership card: shaded title band, then one bold heading (with a count) and a numbered list per section.
+def text_block(text, **extra):
+    return {"type": "TextBlock", "text": text, "wrap": True, **extra}
 
-    ponytail: Teams may clip the number of a two-digit list item (10+ entries); switch back to bullets if it matters.
+
+def heading(title, count):
+    return text_block(f"{title} ({count})" if count else title, weight="Bolder", size="Medium",
+                      separator=True, spacing="Large")
+
+
+NONE = text_block("None", isSubtle=True, spacing="Small")
+
+
+def table_cell(text, **extra):
+    return {"type": "TableCell", "items": [{"type": "TextBlock", "text": text, **extra}]}
+
+
+def grouped_table(rows, last, cap):
+    """Rows (name, team, detail) grouped by team: biggest team first, 'No team' last, numbering continuous.
+
+    At most `cap` people are listed; the rest are summarised in a final '...and N more' row.
+    Every row has exactly three cells, matching the three columns. Cells stay lean: rows dominate card size.
     """
-    title, _, rest = text.partition("\n")
-    body = [{"type": "Container", "style": "emphasis", "bleed": True, "items": [
-        {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Large", "wrap": True}]}]
-    for group in rest.strip("\n").split("\n\n"):
-        heading, _, items = group.partition("\n")
-        lines = [line for line in items.split("\n") if line.strip()]
-        entries = [re.sub(r"^\d+\.\s+", "", line) for line in lines if re.match(r"\d+\.\s", line)]
-        notes = [line for line in lines if not re.match(r"\d+\.\s", line) and line != "None"]
-        name = heading.rstrip(":")
-        body.append({"type": "TextBlock", "text": f"{name} ({len(entries)})" if entries else name,
-                     "weight": "Bolder", "size": "Medium", "wrap": True, "separator": True, "spacing": "Large"})
-        if entries:
-            body.append({"type": "TextBlock", "text": "\n".join(f"{i}. {e}" for i, e in enumerate(entries, 1)), "wrap": True, "spacing": "Small"})
+    groups = {}
+    for name, team, detail in rows:
+        groups.setdefault(team or "No team", []).append((name, detail))
+    out, n = [{"type": "TableRow", "style": "emphasis",
+               "cells": [table_cell(h, weight="Bolder") for h in ("#", "Name", last)]}], 0
+    for team in sorted(groups, key=lambda t: (t == "No team", -len(groups[t]), t)):
+        if n == cap:
+            break
+        out.append({"type": "TableRow", "style": "accent", "cells": [
+            table_cell(""), table_cell(f"{team} ({len(groups[team])})", weight="Bolder", wrap=True), table_cell("")]})
+        for name, detail in sorted(groups[team])[:cap - n]:
+            n += 1
+            out.append({"type": "TableRow", "cells": [
+                table_cell(str(n), isSubtle=True), table_cell(name, wrap=True), table_cell(detail, wrap=True)]})
+    if n < len(rows):
+        out.append({"type": "TableRow", "cells": [
+            table_cell(""), table_cell(f"...and {len(rows) - n} more", isSubtle=True, wrap=True), table_cell("")]})
+    return {"type": "Table", "columns": [{"width": "36px"}, {"width": 3}, {"width": 3}],
+            "firstRowAsHeader": True, "showGridLines": True, "spacing": "Small", "rows": out}
+
+
+def digest_card(digest):
+    """Leadership card: shaded title band, holidays as a numbered list, people as team-grouped tables.
+
+    The following-window table starts hidden behind a Show/Hide toggle. Each table lists at most MAX_ITEMS
+    people, lowered one at a time until the card fits MAX_CARD_BYTES, so a worst-case roster still posts.
+    """
+    for cap in range(MAX_ITEMS, 0, -1):  # the largest per-table cap that fits; small tables are unaffected
+        body = [{"type": "Container", "style": "emphasis", "bleed": True, "items": [
+            text_block(digest["title"], weight="Bolder", size="Large")]}]
+        items = digest["holidays"]
+        body += [heading("Upcoming Holidays", len(items)),
+                 text_block("\n".join(f"{i}. {h}" for i, h in enumerate(items, 1)), spacing="Small") if items else NONE]
+        for title, rows in digest["sections"]:
+            body += [heading(title, len(rows)), grouped_table(rows, "Details", cap) if rows else NONE]
+        (days, rows), (later_days, later) = digest["windows"]
+        body += [heading(WINDOW_TITLES[0], len(rows)), text_block(span(days), isSubtle=True, spacing="None"),
+                 grouped_table(rows, "Dates", cap) if rows else NONE]
+        later_title = text_block(span(later_days), isSubtle=True, spacing="None")
+        if later:
+            ids = ["following-table", "following-show", "following-hide"]
+            body += [{"type": "Container", "separator": True, "spacing": "Large",
+                      "selectAction": {"type": "Action.ToggleVisibility", "targetElements": ids},
+                      "items": [{"type": "ColumnSet", "columns": [
+                          {"type": "Column", "width": "stretch", "items": [
+                              text_block(f"{WINDOW_TITLES[1]} ({len(later)})", weight="Bolder", size="Medium"), later_title]},
+                          {"type": "Column", "width": "auto", "verticalContentAlignment": "Center", "items": [
+                              text_block("Show ▾", id=ids[1], color="Accent", weight="Bolder"),
+                              text_block("Hide ▴", id=ids[2], color="Accent", weight="Bolder", isVisible=False,
+                                         spacing="None")]}]}]},
+                     {**grouped_table(later, "Dates", cap), "id": ids[0], "isVisible": False}]
         else:
-            body.append({"type": "TextBlock", "text": "None", "isSubtle": True, "spacing": "Small"})
-        for note in notes:
-            body.append({"type": "TextBlock", "text": note, "isSubtle": True, "wrap": True, "spacing": "None"})
-    card = {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard",
-            "version": "1.4", "body": body}
-    return {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
-                                                "contentUrl": None, "content": card}]}
+            body += [heading(WINDOW_TITLES[1], 0), later_title, NONE]
+        card = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+                "contentUrl": None, "content": {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                                                "type": "AdaptiveCard", "version": "1.5", "body": body}}]}
+        if len(json.dumps(card)) <= MAX_CARD_BYTES:
+            break
+    return card
 
 
 ALERT_NEXT = {
@@ -551,17 +655,7 @@ def run():
             print("WARNING: ALERT_WEBHOOK_URL equals TEAMS_WEBHOOK_URL; failure alerts, which name employees, "
                   "go to the same channel as the digest. Use a private owners' channel for alerts.")
         required("SLACK_LEAVE_BOT_ID")
-    days = int(os.getenv("UPCOMING_DAYS", "0"))
-    if not 0 <= days <= 90:
-        raise DigestError("UPCOMING_DAYS must be 0 (month end) or 1–90.")
     month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
-    min_days = int(os.getenv("UPCOMING_MIN_DAYS", "14"))
-    if not 0 <= min_days <= 90:
-        raise DigestError("UPCOMING_MIN_DAYS must be between 0 and 90.")
-    # Default window: through month end, but at least min_days ahead. Months after the current one are
-    # optional then: if their tab is missing or invalid we fall back to month end instead of failing.
-    last_day = today + timedelta(days=days) if days else max(month_end, today + timedelta(days=min_days))
-    fell_back = False
     sheets = Sheets()
     mapping_rows = sheets.read("Employee Mapping", "A1:Z5000")
     mapping, hidden, teams = employee_mapping(mapping_rows), shadow_names(mapping_rows), team_labels(mapping_rows)
@@ -569,9 +663,11 @@ def run():
     max_rows = int(os.getenv("CALENDAR_MAX_ROWS", "500"))
     if not 2 <= max_rows <= 5000:
         raise DigestError("CALENDAR_MAX_ROWS must be 2–5000.")
-    while current <= last_day:
+    # Load monthly tabs until they cover the 2*WINDOW working days the digest shows (holidays can push this
+    # past month or year end). Tabs after the current month are optional: if one is missing or invalid the
+    # windows stop at the last loaded day and the owners get a heads-up.
+    while not months or len(working_days(months, today, hidden)) < 2 * WINDOW:
         title = current.strftime("%B %Y")
-        optional = not days and current > today.replace(day=1)
         try:
             rows = sheets.read(title, f"A1:AZ{max_rows}")
             originals[title] = json.loads(json.dumps(rows))
@@ -584,25 +680,23 @@ def run():
                 evaluated = sheets.read(title, f"A1:AZ{max_rows}", render="UNFORMATTED_VALUE")
             months.append(Month(title, rows, current.year, current.month, evaluated=evaluated))
         except DigestError as exc:
-            if not optional or exc.kind == "sheets":  # only a tab problem may truncate the window, never an outage
+            if not months or exc.kind == "sheets":  # only a later tab may truncate the window, never an outage
                 raise
             originals.pop(title, None)
-            last_day, fell_back = current - timedelta(days=1), True
             note = (f"The '{title}' calendar could not be used ({exc}) so this digest only covers through "
-                    f"{last_day:%d %b}. Create or fix the tab.")
+                    f"{current - timedelta(days=1):%d %b}. Create or fix the tab.")
             print(note)
             send_alert("notice", note)
             break
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days = working_days(months, today, hidden)
+    # Write window: never shorter than month end, and covers every day the digest shows.
+    last_day = max(month_end, days[-1]) if len(days) == 2 * WINDOW else max(months[-1].dates)
     this_month = months[0]
     missing = (set(n for n in map(normalized, mapping.values())) | set(hidden)) - set(this_month.people)
     if missing:  # Count only. A typo here would show a Shadow person in the digest or drop leave writes.
         print(f"{len(missing)} Employee Mapping name(s) were not found in the {this_month.title} calendar "
               f"({len(missing & set(hidden))} marked Shadow); check spelling against the calendar.")
-    next_title = (today.replace(day=28) + timedelta(days=4)).replace(day=1).strftime("%B %Y")
-    if mode == "live" and not fell_back and today.day >= 24 and next_title not in sheets.titles:
-        send_alert("notice", f"Next month's tab '{next_title}' does not exist yet. Create it before the first "
-                             "working day of the month, or that day's digest will fail.")
     if os.getenv("SKIP_HOLIDAYS", "true").lower() == "true":
         codes = [this_month.code(r, today) for r in this_month.people.values()]
         if codes and all(c == "HL" for c in codes):
@@ -635,10 +729,10 @@ def run():
     for leave in sorted(leaves, key=lambda l: l.code != "SL"):
         for month in months:
             writes.extend(month.plan(leave, mapping[leave.user], today, last_day))
-    text = make_digest(months, today, last_day, hidden, teams)
-    card = digest_card(text)
+    digest = make_digest(months, today, hidden, teams)
+    card = digest_card(digest)
     if len(json.dumps(card)) > MAX_CARD_BYTES:
-        raise DigestError("The digest card is too large for a Teams webhook; reduce the roster window.")
+        raise DigestError("The digest card is too large for a Teams webhook even with its tables capped.")
     if mode == "preview":
         # Never print HR data or upload it as a public Actions artifact.
         private_path = os.getenv("PRIVATE_PREVIEW_PATH", "")
@@ -647,7 +741,7 @@ def run():
                 raise DigestError("Private preview files are only supported outside GitHub Actions.")
             fd = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as out:
-                out.write(text)
+                out.write(digest_text(digest))
         print(f"Preview passed: {len(leaves)} active requests; {len(writes)} calendar updates. No writes or Teams post.")
         return
     import requests

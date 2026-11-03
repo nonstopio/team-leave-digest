@@ -1,4 +1,5 @@
 import calendar
+import json
 import unittest
 import copy
 import os
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 import digest
-from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, make_digest, parse_request, shadow_names, team_labels, webhook_url
+from digest import DigestError, Leave, Month, column, date_list, employee_mapping, build_card, digest_card, digest_text, make_digest, parse_request, shadow_names, team_labels, webhook_url
 
 
 def month(name_col=2):
@@ -20,6 +21,25 @@ def cal_rows(year, month_no, name_col=2):
     first, days = date(year, month_no, 1), calendar.monthrange(year, month_no)[1]
     headers = [''] * name_col + ['Name'] + [(first + timedelta(days=i) - date(1899, 12, 30)).days for i in range(days)]
     return [headers, [''] * name_col + ['Sample Employee'] + [''] * days]
+
+
+def text_of(months, today, hidden=frozenset(), teams=None):
+    return digest_text(make_digest(months, today, hidden, teams))
+
+
+def walk(element):
+    """Every dict inside a card, depth first."""
+    if isinstance(element, dict):
+        yield element
+        for value in element.values():
+            yield from walk(value)
+    elif isinstance(element, list):
+        for value in element:
+            yield from walk(value)
+
+
+def cell_texts(table):
+    return [[c['items'][0]['text'] for c in row['cells']] for row in table['rows']]
 
 
 class DigestTests(unittest.TestCase):
@@ -102,7 +122,7 @@ class DigestTests(unittest.TestCase):
         m, today = month(), date(2026, 10, 15)
         for day, code in [(15, 'SL'), (19, 'PL'), (20, 'HL'), (21, 'PL'), (22, 'CPL')]:
             m.rows[1][m.dates[date(2026, 10, day)]] = code
-        text = make_digest([m], today, date(2026, 10, 31))
+        text = text_of([m], today)
         self.assertIn('Sick/Emergency leave', text)
         self.assertIn('19th Oct, 21st Oct', text)
         self.assertNotIn('22 Oct', text)
@@ -118,45 +138,34 @@ class DigestTests(unittest.TestCase):
                          ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd'])
         self.assertEqual(build_card('T', 'good', 'Sample')['attachments'][0]['content']['type'], 'AdaptiveCard')
 
-    def test_card_keeps_raw_text_and_separate_lines(self):
+    def test_card_keeps_raw_text_and_uses_tables(self):
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.name_col] = "O'Brien & Sons"
         m.rows[1][m.dates[today]] = 'SL'
         m.rows[1][m.dates[date(2026, 10, 19)]] = 'PL'
         m.rows[1][m.dates[date(2026, 10, 20)]] = 'PL'
         m = Month(m.title, m.rows, 2026, 10)
-        card = digest_card(make_digest([m], today, date(2026, 10, 31)))
+        card = digest_card(make_digest([m], today))
         content = card['attachments'][0]['content']
         self.assertTrue(content['$schema'].startswith('http'))
+        self.assertEqual(content['version'], '1.5')
         header = content['body'][0]
         self.assertEqual((header['type'], header['style']), ('Container', 'emphasis'))
         self.assertEqual(header['items'][0]['text'], 'Leaves: 15th October 2026')
         self.assertNotIn('actions', content)
-        blocks = {b['text']: b for b in content['body'][1:]}
-        texts = list(blocks)
-        self.assertFalse(any('&amp;' in t or '&#x27;' in t for t in texts))
-        # heading carries a count; entries are a numbered list
-        self.assertIn('Sick/Emergency Leaves (1)', blocks)
-        self.assertIn("1. O'Brien & Sons: Sick/Emergency leave", texts)
-        self.assertIn("1. O'Brien & Sons: 19th-20th Oct", texts)
-        self.assertFalse(any(t.startswith('- ') for t in texts))
+        self.assertNotIn('[TEST]', str(content))
+        texts = [b.get('text') for b in content['body']]
+        self.assertFalse(any('&amp;' in str(t) or '&#x27;' in str(t) for t in texts))
+        self.assertIn('Sick/Emergency Leaves (1)', texts)
+        self.assertIn('Upcoming Leaves · next 5 working days (1)', texts)
+        tables = [b for b in content['body'] if b['type'] == 'Table']
+        self.assertEqual(cell_texts(tables[0]), [['#', 'Name', 'Details'], ['', 'No team (1)', ''],
+                                                 ['1', "O'Brien & Sons", 'Sick/Emergency leave']])
+        self.assertEqual(cell_texts(tables[1])[-1], ['1', "O'Brien & Sons", '19th-20th Oct'])
+        self.assertEqual(cell_texts(tables[1])[0], ['#', 'Name', 'Dates'])
         # empty sections stay visible but quiet
-        self.assertEqual(blocks['None']['isSubtle'], True)
-        self.assertIn('Half-day Leaves', blocks)
-
-    def test_many_entries_render_as_one_numbered_block_with_overflow_note(self):
-        m, today = month(), date(2026, 10, 15)
-        m.rows.extend([[''] * m.name_col + [f'Person {i}'] + [''] * 31 for i in range(60)])
-        for r in range(1, len(m.rows)):
-            m.rows[r][m.dates[today]] = 'SL'
-        m = Month(m.title, m.rows, 2026, 10)
-        blocks = digest_card(make_digest([m], today, today))['attachments'][0]['content']['body']
-        texts = [b.get('text', '') for b in blocks]
-        self.assertIn('Sick/Emergency Leaves (50)', texts)
-        numbered = next(t for t in texts if t.startswith('1. ') and 'Person 5' in t)
-        self.assertEqual(len(numbered.split('\n')), 50)
-        self.assertTrue(numbered.endswith('50. Person 48: Sick/Emergency leave'))
-        self.assertIn('...and 11 more', texts)
+        i = texts.index('Half-day Leaves')
+        self.assertEqual((texts[i + 1], content['body'][i + 1]['isSubtle']), ('None', True))
 
     def test_shadow_roles_are_found_by_header_and_hidden_from_digest(self):
         rows = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U1', 'Sample Employee', 'Shadow QA', 'V1'],
@@ -168,20 +177,20 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(digest.employee_mapping(rows), {'U1': 'Sample Employee', 'U2': 'Other Person', 'U3': 'Lead Person'})
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.dates[today]] = 'SL'
-        self.assertIn('Sample Employee', make_digest([m], today, today))
-        self.assertNotIn('Sample Employee', make_digest([m], today, today, shadow_names(rows)))
+        self.assertIn('Sample Employee', text_of([m], today))
+        self.assertNotIn('Sample Employee', text_of([m], today, shadow_names(rows)))
 
-    def test_team_is_appended_to_names_in_every_section(self):
+    def test_team_is_appended_to_names_in_the_preview_text(self):
         rows = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U1', 'Sample Employee', 'QA', 'INT'], ['U2', 'No Team', 'QA', '']]
         self.assertEqual(team_labels(rows), {'sample employee': 'INT'})
         self.assertEqual(team_labels([['Slack User ID', 'Tracker Name']]), {})
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.dates[today]] = 'SL'
         m.rows[1][m.dates[date(2026, 10, 19)]] = 'PL'
-        text = make_digest([m], today, date(2026, 10, 31), teams=team_labels(rows))
+        text = text_of([m], today, teams=team_labels(rows))
         self.assertIn('Sample Employee (INT): Sick/Emergency leave', text)
         self.assertIn('Sample Employee (INT): 19th Oct', text)
-        self.assertIn('Sample Employee: Sick/Emergency leave', make_digest([m], today, today))  # no Team column: unchanged
+        self.assertIn('Sample Employee: Sick/Emergency leave', text_of([m], today))  # no Team column: unchanged
 
     def test_placeholder_duplicate_cannot_hide_a_real_employee(self):
         rows = [['Slack User ID', 'Tracker Name', 'Role'], ['U1', 'Sample Employee', 'QA'], ['', 'sample  employee', 'Shadow QA']]
@@ -200,19 +209,20 @@ class DigestTests(unittest.TestCase):
     def test_free_text_in_a_cell_never_reaches_leadership(self):
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.dates[today]] = 'Sick - doctor appt, private'
-        text = make_digest([m], today, today)
+        text = text_of([m], today)
         self.assertIn('Other Entries', text)
         self.assertNotIn('doctor', text)
         self.assertIn('Sample Employee: unrecognized entry (unrecognized code)', text)
         m.rows[1][m.dates[today]] = 'ml'
-        self.assertIn('Sample Employee: ML (unrecognized code)', make_digest([m], today, today))
+        self.assertIn('Sample Employee: ML (unrecognized code)', text_of([m], today))
 
     def test_newline_in_a_name_stays_on_one_line(self):
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.name_col] = 'Ann\n\nSmith'
         m.rows[1][m.dates[today]] = 'SL'
         m = Month(m.title, m.rows, 2026, 10)
-        self.assertIn('1. Ann Smith: Sick/Emergency leave', make_digest([m], today, today))
+        self.assertIn('1. Ann Smith: Sick/Emergency leave', text_of([m], today))
+        self.assertIn('Ann Smith', cell_texts(next(e for e in walk(digest_card(make_digest([m], today))) if e.get('type') == 'Table'))[2])
 
     def test_absurd_date_header_is_a_clean_error(self):
         rows = month().rows
@@ -295,18 +305,11 @@ class DigestTests(unittest.TestCase):
     def test_unknown_code_is_shown_not_dropped(self):
         m, today = month(), date(2026, 10, 15)
         m.rows[1][m.dates[today]] = 'ML'
-        text = make_digest([m], today, today)
+        text = text_of([m], today)
         self.assertIn('Other Entries', text)
         self.assertIn('Sample Employee: ML', text)
-        self.assertNotIn('Other Entries', make_digest([month()], today, today))
-
-    def test_item_cap(self):
-        m, today = month(), date(2026, 10, 15)
-        m.rows.extend([[''] * m.name_col + [f'Person {i}'] + [''] * 31 for i in range(60)])
-        for r in range(1, len(m.rows)):
-            m.rows[r][m.dates[today]] = 'SL'
-        m = Month(m.title, m.rows, 2026, 10)
-        self.assertIn('...and 11 more', make_digest([m], today, today))
+        self.assertNotIn('Other Entries', text_of([month()], today))
+        self.assertNotIn('Other Entries', str(digest_card(make_digest([month()], today))))
 
     def test_webhook_url_rejects_unsafe_values(self):
         for bad in ['http://example.invalid/x', 'https://u:p@example.invalid/x',
@@ -319,7 +322,7 @@ class DigestTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def run_job(self, mode='preview', status=None, post_status=202, changed=False, leaves=None, post_error=None,
-                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026'), nov_edit=None, nov_outage=False):
+                alert_status=202, env_extra=None, post_statuses=None, claim_error_on=None, rows_edit=None, now=date(2026, 10, 15), mapping_extra=None, mapping_later=None, titles=('October 2026', 'November 2026'), nov_edit=None, nov_outage=False, tabs=None):
         rows = month().rows
         sheets = Mock()
         sheets.titles = set(titles) | {'Employee Mapping', 'Digest State'}
@@ -335,6 +338,8 @@ class MainTests(unittest.TestCase):
             reads.append(title)
             if title == 'November 2026' and nov_outage:
                 raise DigestError('Google Sheets API failed', 'sheets')
+            if title in (tabs or {}) and title in sheets.titles:
+                return copy.deepcopy(tabs[title])
             if title == 'November 2026' and title in sheets.titles:
                 return copy.deepcopy(nov_rows)
             if title != 'Employee Mapping':
@@ -481,11 +486,13 @@ class MainTests(unittest.TestCase):
         self.assertNotIn('Sample Employee', card)
         self.assertIn('Sick/Emergency Leaves', card)
 
-    def test_live_card_shows_team_suffix(self):
+    def test_live_card_groups_by_team_without_name_suffix(self):
         mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'INT']]
         sheets, post, error = self.run_job('live', mapping_extra=mapping)
         self.assertIsNone(error)
-        self.assertIn('1. Sample Employee (INT): Sick/Emergency leave', str(post.call_args_list[0].kwargs['json']))
+        body = post.call_args_list[0].kwargs['json']['attachments'][0]['content']['body']
+        sick = body[[b.get('text') for b in body].index('Sick/Emergency Leaves (1)') + 1]
+        self.assertEqual(cell_texts(sick)[1:], [['', 'INT (1)', ''], ['1', 'Sample Employee', 'Sick/Emergency leave']])
 
     def test_team_change_during_run_is_treated_as_stale(self):
         first = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V1']]
@@ -502,23 +509,25 @@ class MainTests(unittest.TestCase):
         sheets.write.assert_not_called()
         self.assertEqual(self.posted(post), ['alert'])
 
-    def test_window_stays_at_month_end_mid_month_and_reaches_next_month_late(self):
-        sheets, post, error = self.run_job('live', now=date(2026, 10, 15))  # 15 + 14 = Oct 29: still inside October
+    @staticmethod
+    def spans(post):
+        """The two window date labels of the leadership card."""
+        body = post.call_args_list[-1].kwargs['json']['attachments'][0]['content']['body']
+        return [e['text'] for e in walk(body) if e.get('type') == 'TextBlock' and e.get('isSubtle')
+                and (' – ' in e['text'] or 'Not covered' in e['text'])]
+
+    def test_window_stays_in_october_mid_month_and_reaches_next_month_late(self):
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 15))  # 10th working day is Oct 29
         self.assertNotIn('November 2026', sheets.reads)
+        self.assertEqual(self.spans(post), ['Fri 16 Oct – Thu 22 Oct', 'Fri 23 Oct – Thu 29 Oct'])
         def nov_leave(rows):
             rows[1][[i for i, v in enumerate(rows[0]) if v == (date(2026, 11, 2) - date(1899, 12, 30)).days][0]] = 'PL'
-        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), nov_edit=nov_leave)  # 26 + 14 = Nov 9
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), nov_edit=nov_leave)  # 10th working day is Nov 9
         self.assertIsNone(error)
         self.assertIn('November 2026', sheets.reads)
-        self.assertIn('1. Sample Employee: 2nd Nov', str(post.call_args_list[-1].kwargs['json']))
-
-    def test_min_days_zero_keeps_month_end_only(self):
-        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), env_extra={'UPCOMING_MIN_DAYS': '0'})
-        self.assertNotIn('November 2026', sheets.reads)
-
-    def test_min_days_is_validated(self):
-        sheets, post, error = self.run_job('live', env_extra={'UPCOMING_MIN_DAYS': '91'})
-        self.assertIn('UPCOMING_MIN_DAYS', str(error))
+        self.assertEqual(self.spans(post), ['Tue 27 Oct – Mon 2 Nov', 'Tue 3 Nov – Mon 9 Nov'])
+        (table,) = [e for e in walk(post.call_args_list[-1].kwargs['json']) if e.get('type') == 'Table']
+        self.assertEqual(cell_texts(table)[-1], ['1', 'Sample Employee', '2nd Nov'])  # in window 1, across month end
 
     def test_missing_or_invalid_next_month_falls_back_with_a_heads_up(self):
         sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',))
@@ -529,6 +538,9 @@ class MainTests(unittest.TestCase):
         self.assertIn("'November 2026' calendar could not be used", alert)
         self.assertIn('only covers through 31 Oct', alert)
         self.assertNotIn('NOT sent', alert)
+        self.assertEqual(alert.count('heads-up'), 1)  # one notice, not a second 'tab does not exist' alert
+        self.assertEqual(self.spans(post), ["Tue 27 Oct – Fri 30 Oct (calendar ends here: next month's tab is missing)",
+                                            "Not covered: next month's calendar tab is missing"])
         # a tab that exists but is broken falls back the same way
         sheets, post, error = self.run_job('live', now=date(2026, 10, 26),
                                            nov_edit=lambda rows: rows.__setitem__(0, ['Name']))
@@ -597,12 +609,46 @@ class MainTests(unittest.TestCase):
                 digest.run()
             sheets_cls.assert_not_called()
 
-    def test_explicit_upcoming_days_still_requires_the_next_tab(self):
-        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',),
-                                           env_extra={'UPCOMING_DAYS': '14'})
-        self.assertIsInstance(error, DigestError)
-        sheets.write.assert_not_called()
-        self.assertIn('NOT sent', str(post.call_args_list[0].kwargs['json']))
+    def test_holidays_push_the_window_into_next_month_and_writes_follow(self):
+        def week_off(rows):  # Oct 26-30 are holidays: the 10th working day moves from Oct 29 to Nov 5
+            for d in range(26, 31):
+                rows[1][rows[0].index((date(2026, 10, d) - date(1899, 12, 30)).days)] = 'HL'
+        leave = Leave('U123', date(2026, 11, 4), date(2026, 11, 4), 'SL')
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 15), rows_edit=week_off, leaves=[leave])
+        self.assertIsNone(error)
+        self.assertIn('November 2026', sheets.reads)
+        self.assertEqual(self.spans(post), ['Fri 16 Oct – Thu 22 Oct', 'Fri 23 Oct – Thu 5 Nov'])
+        self.assertEqual([w['range'].split('!')[0] for w in sheets.write.call_args.args[0]], ["'November 2026'"])
+
+    def test_write_window_still_reaches_month_end_mid_month(self):
+        leave = Leave('U123', date(2026, 10, 30), date(2026, 10, 30), 'SL')  # after the 10th working day (Oct 29)
+        sheets, post, error = self.run_job('live', now=date(2026, 10, 15), leaves=[leave])
+        self.assertIsNone(error)
+        self.assertEqual(len(sheets.write.call_args.args[0]), 1)
+
+    def test_window_crosses_year_end_into_january(self):
+        jan = cal_rows(2027, 1)
+        jan[1][jan[0].index((date(2027, 1, 1) - date(1899, 12, 30)).days)] = 'HL'
+        sheets, post, error = self.run_job('live', now=date(2026, 12, 28), titles=('December 2026', 'January 2027'),
+                                           tabs={'December 2026': cal_rows(2026, 12), 'January 2027': jan})
+        self.assertIsNone(error)
+        self.assertIn('January 2027', sheets.reads)
+        self.assertEqual(self.spans(post), ['Tue 29 Dec – Tue 5 Jan', 'Wed 6 Jan – Tue 12 Jan'])
+        self.assertIn('Friday, January 1, 2027', str(post.call_args_list[-1].kwargs['json']))
+
+    def test_preview_file_gets_the_text_rendering(self):
+        path = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'digest_preview_test.txt')
+        if os.path.exists(path):
+            os.remove(path)
+        sheets, post, error = self.run_job('preview', env_extra={'PRIVATE_PREVIEW_PATH': path})
+        self.assertIsNone(error)
+        with open(path) as f:
+            text = f.read()
+        os.remove(path)
+        self.assertTrue(text.startswith('Leaves: 15th October 2026'))
+        self.assertIn('1. Sample Employee: Sick/Emergency leave', text)
+        self.assertIn('Upcoming Leaves · next 5 working days (Fri 16 Oct – Thu 22 Oct):', text)
+        self.assertIn('Following 5 working days (Fri 23 Oct – Thu 29 Oct):', text)
 
     def test_leave_spanning_month_end_is_written_into_both_tabs(self):
         leave = Leave('U123', date(2026, 10, 30), date(2026, 11, 3), 'SL')
@@ -616,12 +662,6 @@ class MainTests(unittest.TestCase):
         for kwargs in ({'now': date(2026, 10, 15), 'titles': ('October 2026',)}, {'now': date(2026, 10, 26)}):
             sheets, post, error = self.run_job('live', **kwargs)
             self.assertEqual(self.posted(post), ['leadership'])
-
-    def test_heads_up_when_window_is_month_end_only_and_tab_missing_late_in_month(self):
-        sheets, post, error = self.run_job('live', now=date(2026, 10, 26), titles=('October 2026',),
-                                           env_extra={'UPCOMING_MIN_DAYS': '0'})
-        self.assertEqual(self.posted(post), ['alert', 'leadership'])
-        self.assertIn("'November 2026' does not exist", str(post.call_args_list[0].kwargs['json']))
 
     def test_mapping_names_missing_from_calendar_are_counted_not_named(self):
         mapping = [['Slack User ID', 'Tracker Name', 'Role', 'Team'], ['U123', 'Sample Employee', 'QA', 'V1'],
@@ -735,6 +775,169 @@ class MainTests(unittest.TestCase):
                      self.assertRaises(DigestError):
                     digest.run()
                 sheets_cls.assert_not_called()
+
+
+class WindowAndCardTests(unittest.TestCase):
+    """Two windows of 5 working days from tomorrow; team-grouped tables on the card."""
+
+    @staticmethod
+    def nov(marks=(), extra=()):
+        """November 2026 tab; marks are (row, day, code), extra adds more people."""
+        rows = cal_rows(2026, 11)
+        rows += [[''] * 2 + [name] + [''] * 30 for name in extra]
+        for r, day, code in marks:
+            rows[r][rows[0].index((date(2026, 11, day) - date(1899, 12, 30)).days)] = code
+        return Month('November 2026', rows, 2026, 11)
+
+    def windows(self, today, marks=()):
+        return [days for days, _ in make_digest([self.nov(marks)], today)['windows']]
+
+    def assert_valid_card(self, card):
+        content = card['attachments'][0]['content']
+        self.assertEqual(content['version'], '1.5')
+        elements = list(walk(content['body']))
+        ids = [e['id'] for e in elements if 'id' in e]
+        self.assertEqual(len(ids), len(set(ids)))
+        for e in elements:
+            if e.get('type') == 'Table':
+                self.assertEqual(e['columns'], [{'width': '36px'}, {'width': 3}, {'width': 3}])
+                self.assertTrue(e['firstRowAsHeader'] and e['showGridLines'])
+                self.assertEqual(e['rows'][0]['style'], 'emphasis')
+                for row in e['rows']:
+                    self.assertEqual(len(row['cells']), len(e['columns']))
+            if e.get('type') == 'Action.ToggleVisibility':
+                self.assertTrue(set(e['targetElements']) <= set(ids))
+        self.assertLessEqual(len(json.dumps(card)), digest.MAX_CARD_BYTES)
+        return content['body']
+
+    def test_windows_start_tomorrow_and_hold_five_working_days_each(self):
+        cases = {date(2026, 11, 2): ['Tue 3 Nov – Mon 9 Nov', 'Tue 10 Nov – Mon 16 Nov'],    # Monday
+                 date(2026, 11, 3): ['Wed 4 Nov – Tue 10 Nov', 'Wed 11 Nov – Tue 17 Nov'],   # Tuesday
+                 date(2026, 11, 5): ['Fri 6 Nov – Thu 12 Nov', 'Fri 13 Nov – Thu 19 Nov'],   # Thursday
+                 date(2026, 11, 6): ['Mon 9 Nov – Fri 13 Nov', 'Mon 16 Nov – Fri 20 Nov']}   # Friday: starts Monday
+        for today, labels in cases.items():
+            windows = self.windows(today)
+            self.assertEqual([digest.span(w) for w in windows], labels)
+            self.assertEqual([len(w) for w in windows], [5, 5])
+            self.assertTrue(all(d.weekday() < 5 for w in windows for d in w))
+
+    def test_holidays_extend_the_window_and_are_listed(self):
+        tue = date(2026, 11, 3)
+        nov = lambda *days: [date(2026, 11, d) for d in days]
+        self.assertEqual(self.windows(tue, [(1, 9, 'HL')]), [nov(4, 5, 6, 10, 11), nov(12, 13, 16, 17, 18)])  # in window 1
+        self.assertEqual(self.windows(tue, [(1, 13, 'HL')]), [nov(4, 5, 6, 9, 10), nov(11, 12, 16, 17, 18)])  # in window 2
+        self.assertEqual(self.windows(tue, [(1, 4, 'HL')]), [nov(5, 6, 9, 10, 11), nov(12, 13, 16, 17, 18)])  # tomorrow
+        d = make_digest([self.nov([(1, 3, 'HL'), (1, 4, 'HL'), (1, 18, 'HL'), (1, 25, 'HL')])], tue)
+        # today is not "upcoming"; with Nov 4 and 18 off the 10th working day is Nov 19, so Nov 25 is past it
+        self.assertEqual(d['holidays'], ['Wednesday, November 4, 2026', 'Wednesday, November 18, 2026'])
+
+    def test_person_in_both_windows_shows_each_windows_dates(self):
+        m = self.nov([(1, d, 'PL') for d in (9, 10, 11, 12)])
+        (_, first), (_, second) = make_digest([m], date(2026, 11, 3))['windows']
+        self.assertEqual(first, [('Sample Employee', '', '9th-10th Nov')])
+        self.assertEqual(second, [('Sample Employee', '', '11th-12th Nov')])
+
+    def test_only_planned_leave_on_window_working_days_is_upcoming(self):
+        # Fri 6 counts; Sat 7 (weekend) is not a working day; Thu 19 is the 11th working day (windows end Wed 18)
+        # because Tue 10 is a company holiday (every row HL).
+        m = self.nov([(1, d, 'PL') for d in (6, 7, 19)] + [(r, 10, 'HL') for r in (1, 2)], extra=['Second Person'])
+        d = make_digest([m], date(2026, 11, 3))
+        (_, first), (_, second) = d['windows']
+        self.assertEqual(first, [('Sample Employee', '', '6th Nov')])
+        self.assertEqual(second, [])
+        self.assertEqual(d['holidays'], ['Tuesday, November 10, 2026'])
+        for code in ('SL', 'HD', 'CPL', 'ML', 'WK'):
+            (_, first), _ = make_digest([self.nov([(1, 4, code)])], date(2026, 11, 3))['windows']
+            self.assertEqual(first, [], code)
+
+    def test_one_persons_hl_is_not_a_company_holiday(self):
+        # Only one of two people has HL on Mon 9: the day stays a working day and the other's leave is listed.
+        m = self.nov([(1, 9, 'PL'), (2, 9, 'HL')], extra=['Regional Holiday'])
+        d = make_digest([m], date(2026, 11, 3))
+        days, first = d['windows'][0]
+        self.assertIn(date(2026, 11, 9), days)
+        self.assertEqual(first, [('Sample Employee', '', '9th Nov')])
+        self.assertEqual(d['holidays'], [])
+
+    def test_shadow_rows_do_not_block_a_company_holiday(self):
+        # A hidden (Shadow) row without HL must not stop a day every visible person has off from being a holiday.
+        m = self.nov([(1, 10, 'HL')], extra=['Shadow Lead'])
+        self.assertEqual(make_digest([m], date(2026, 11, 3), hidden={'shadow lead'})['holidays'],
+                         ['Tuesday, November 10, 2026'])
+
+    def test_toggle_hides_the_following_window_table(self):
+        m = self.nov([(1, 4, 'PL'), (1, 12, 'PL')])
+        body = self.assert_valid_card(digest_card(make_digest([m], date(2026, 11, 3))))
+        toggle = next(e for e in body if 'selectAction' in e)
+        self.assertEqual(toggle['selectAction']['targetElements'], ['following-table', 'following-show', 'following-hide'])
+        labels = {e['id']: e for e in walk(toggle) if 'id' in e}
+        self.assertNotIn('isVisible', labels['following-show'])
+        self.assertIs(labels['following-hide']['isVisible'], False)
+        self.assertIn('Following 5 working days (1)', [e.get('text') for e in walk(toggle)])
+        hidden = body[body.index(toggle) + 1]
+        self.assertEqual((hidden['type'], hidden['id'], hidden['isVisible']), ('Table', 'following-table', False))
+        self.assertEqual(cell_texts(hidden)[0], ['#', 'Name', 'Dates'])
+        self.assertIs(body[-1], hidden)
+        self.assertEqual(body[-5]['text'], 'Upcoming Leaves · next 5 working days (1)')
+        self.assertEqual((body[-4]['text'], body[-4]['spacing'], body[-4]['isSubtle']), ('Wed 4 Nov – Tue 10 Nov', 'None', True))
+        self.assertEqual(body[-3]['type'], 'Table')
+
+    def test_empty_windows_say_none_without_a_toggle(self):
+        body = self.assert_valid_card(digest_card(make_digest([self.nov()], date(2026, 11, 3))))
+        texts = [e.get('text') for e in body]
+        self.assertEqual(texts[-6:], ['Upcoming Leaves · next 5 working days', 'Wed 4 Nov – Tue 10 Nov', 'None',
+                                      'Following 5 working days', 'Wed 11 Nov – Tue 17 Nov', 'None'])
+        self.assertFalse(any('selectAction' in e or 'id' in e for e in walk(body)))
+        # window 1 empty, window 2 not: None, then the toggle
+        body = self.assert_valid_card(digest_card(make_digest([self.nov([(1, 12, 'PL')])], date(2026, 11, 3))))
+        self.assertEqual([e.get('text') for e in body][-5:-2], ['Upcoming Leaves · next 5 working days', 'Wed 4 Nov – Tue 10 Nov', 'None'])
+        self.assertIn('selectAction', body[-2])
+
+    def test_tables_group_by_team_with_continuous_numbering(self):
+        rows = [('Ann', 'B', 'x'), ('Bob', 'A', 'x'), ('Cid', '', 'x'), ('Dee', 'A', 'x'), ('Eve', 'B', 'x'),
+                ('Fay', 'C', 'x'), ('Gus', 'B', 'x')]
+        d = {'title': 'Leaves: 3rd November 2026', 'holidays': [], 'sections': [('Sick/Emergency Leaves', rows)],
+             'windows': [([], []), ([], [])]}
+        body = self.assert_valid_card(digest_card(d))
+        self.assertEqual(body[1]['text'], 'Upcoming Holidays')
+        self.assertEqual(body[3]['text'], 'Sick/Emergency Leaves (7)')
+        table = body[4]
+        self.assertEqual(cell_texts(table), [
+            ['#', 'Name', 'Details'],
+            ['', 'B (3)', ''], ['1', 'Ann', 'x'], ['2', 'Eve', 'x'], ['3', 'Gus', 'x'],
+            ['', 'A (2)', ''], ['4', 'Bob', 'x'], ['5', 'Dee', 'x'],
+            ['', 'C (1)', ''], ['6', 'Fay', 'x'],
+            ['', 'No team (1)', ''], ['7', 'Cid', 'x']])
+        self.assertEqual([r.get('style') for r in table['rows']][:3], ['emphasis', 'accent', None])
+
+    def test_names_in_card_cells_have_no_team_suffix(self):
+        m = self.nov([(1, 3, 'SL'), (1, 4, 'PL')])
+        body = self.assert_valid_card(digest_card(make_digest([m], date(2026, 11, 3), teams={'sample employee': 'INT'})))
+        names = [row[1] for e in body if e.get('type') == 'Table' for row in cell_texts(e)[2:]]
+        self.assertEqual(names, ['Sample Employee', 'Sample Employee'])
+
+    def test_worst_case_card_fits_and_says_how_many_more(self):
+        def people(n, detail):
+            return [(f'Firstname Middlename Lastname {i:03}', f'Team {i:03} Platform Engineering', detail) for i in range(n)]
+        long_dates = '4th Nov, 6th Nov, 9th-10th Nov, 12th Nov'
+        d = {'title': 'Leaves: 3rd November 2026',
+             'holidays': [f'Wednesday, November {i}, 2026' for i in range(4, 18)],
+             'sections': [(t, people(70, 'Half day (type unspecified in tracker)')) for t in
+                          ('Sick/Emergency Leaves', 'Half-day Leaves', 'Planned Leaves', 'Other Entries')],
+             'windows': [([date(2026, 11, i) for i in (4, 5, 6, 9, 10)], people(70, long_dates)),
+                         ([date(2026, 11, i) for i in (11, 12, 13, 16, 17)], people(70, long_dates))]}
+        body = self.assert_valid_card(digest_card(d))
+        tables = [e for e in body if e.get('type') == 'Table']
+        self.assertEqual(len(tables), 6)
+        for table in tables:
+            shown = sum(1 for row in cell_texts(table) if row[0].isdigit())
+            self.assertEqual(cell_texts(table)[-1], ['', f'...and {70 - shown} more', ''])
+        self.assertIn('Sick/Emergency Leaves (70)', [e.get('text') for e in body])
+        # a normal day is not capped
+        d['sections'] = [('Sick/Emergency Leaves', people(25, 'Sick/Emergency leave'))]
+        d['windows'] = [([], []), ([], [])]
+        table = next(e for e in self.assert_valid_card(digest_card(d)) if e.get('type') == 'Table')
+        self.assertEqual(cell_texts(table)[-1][0], '25')
 
 
 class RetryTests(unittest.TestCase):
