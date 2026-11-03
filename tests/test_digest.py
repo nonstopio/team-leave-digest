@@ -514,7 +514,7 @@ class MainTests(unittest.TestCase):
         """The two window date labels of the leadership card."""
         body = post.call_args_list[-1].kwargs['json']['attachments'][0]['content']['body']
         return [e['text'] for e in walk(body) if e.get('type') == 'TextBlock' and e.get('isSubtle')
-                and (' – ' in e['text'] or 'Not covered' in e['text'])]
+                and (' – ' in e['text'] or 'not available yet' in e['text'])]
 
     def test_window_stays_in_october_mid_month_and_reaches_next_month_late(self):
         sheets, post, error = self.run_job('live', now=date(2026, 10, 15))  # 10th working day is Oct 29
@@ -539,8 +539,8 @@ class MainTests(unittest.TestCase):
         self.assertIn('only covers through 31 Oct', alert)
         self.assertNotIn('NOT sent', alert)
         self.assertEqual(alert.count('heads-up'), 1)  # one notice, not a second 'tab does not exist' alert
-        self.assertEqual(self.spans(post), ["Tue 27 Oct – Fri 30 Oct (calendar ends here: next month's tab is missing)",
-                                            "Not covered: next month's calendar tab is missing"])
+        self.assertEqual(self.spans(post), ["Tue 27 Oct – Fri 30 Oct · leaves after 31 Oct not available yet",
+                                            "Leaves after 31 Oct not available yet"])
         # a tab that exists but is broken falls back the same way
         sheets, post, error = self.run_job('live', now=date(2026, 10, 26),
                                            nov_edit=lambda rows: rows.__setitem__(0, ['Name']))
@@ -817,7 +817,7 @@ class WindowAndCardTests(unittest.TestCase):
                  date(2026, 11, 6): ['Mon 9 Nov – Fri 13 Nov', 'Mon 16 Nov – Fri 20 Nov']}   # Friday: starts Monday
         for today, labels in cases.items():
             windows = self.windows(today)
-            self.assertEqual([digest.span(w) for w in windows], labels)
+            self.assertEqual([digest.span(w, w[-1]) for w in windows], labels)
             self.assertEqual([len(w) for w in windows], [5, 5])
             self.assertTrue(all(d.weekday() < 5 for w in windows for d in w))
 
@@ -897,7 +897,7 @@ class WindowAndCardTests(unittest.TestCase):
         rows = [('Ann', 'B', 'x'), ('Bob', 'A', 'x'), ('Cid', '', 'x'), ('Dee', 'A', 'x'), ('Eve', 'B', 'x'),
                 ('Fay', 'C', 'x'), ('Gus', 'B', 'x')]
         d = {'title': 'Leaves: 3rd November 2026', 'holidays': [], 'sections': [('Sick/Emergency Leaves', rows)],
-             'windows': [([], []), ([], [])]}
+             'windows': [([], []), ([], [])], 'end': date(2026, 11, 30)}
         body = self.assert_valid_card(digest_card(d))
         self.assertEqual(body[1]['text'], 'Upcoming Holidays')
         self.assertEqual(body[3]['text'], 'Sick/Emergency Leaves (7)')
@@ -925,7 +925,7 @@ class WindowAndCardTests(unittest.TestCase):
              'sections': [(t, people(70, 'Half day (type unspecified in tracker)')) for t in
                           ('Sick/Emergency Leaves', 'Half-day Leaves', 'Planned Leaves', 'Other Entries')],
              'windows': [([date(2026, 11, i) for i in (4, 5, 6, 9, 10)], people(70, long_dates)),
-                         ([date(2026, 11, i) for i in (11, 12, 13, 16, 17)], people(70, long_dates))]}
+                         ([date(2026, 11, i) for i in (11, 12, 13, 16, 17)], people(70, long_dates))], 'end': date(2026, 11, 17)}
         body = self.assert_valid_card(digest_card(d))
         tables = [e for e in body if e.get('type') == 'Table']
         self.assertEqual(len(tables), 6)

@@ -354,18 +354,21 @@ def make_digest(months, today, hidden=frozenset(), teams=None):
             "holidays": [f"{d:%A, %B} {d.day}, {d.year}" for d in sorted(holidays(months, hidden)) if today < d <= end],
             "sections": [(title, sorted(rows)) for title, rows in sections.items()],
             "windows": [(window, [(*person, date_list(ds)) for person, ds in sorted(planned.items())])
-                        for window, planned in zip(windows, upcoming)]}
+                        for window, planned in zip(windows, upcoming)],
+            "end": end}
 
 
 WINDOW_TITLES = (f"Upcoming Leaves · next {WINDOW} working days", f"Following {WINDOW} working days")
 
 
-def span(days):
-    """'Wed 4 Nov – Wed 11 Nov'; a short window means the calendar ran out (next month's tab is missing)."""
+def span(days, end):
+    """'Wed 4 Nov – Wed 11 Nov'. A short window means the calendar ran out (next month's tab is missing);
+    leadership sees a neutral note, the owners get the heads-up alert."""
+    note = f"leaves after {end.day} {end:%b} not available yet"
     if not days:
-        return "Not covered: next month's calendar tab is missing"
+        return note[0].upper() + note[1:]
     text = " – ".join(f"{d:%a} {d.day} {d:%b}" for d in (days[0], days[-1]))
-    return text if len(days) == WINDOW else f"{text} (calendar ends here: next month's tab is missing)"
+    return text if len(days) == WINDOW else f"{text} · {note}"
 
 
 def digest_text(digest):
@@ -380,7 +383,7 @@ def digest_text(digest):
     for title, rows in digest["sections"]:
         lines += ["", title + ":", *people(rows)]
     for title, (days, rows) in zip(WINDOW_TITLES, digest["windows"]):
-        lines += ["", f"{title} ({span(days)}):", *people(rows)]
+        lines += ["", f"{title} ({span(days, digest['end'])}):", *people(rows)]
     return "\n".join(lines)
 
 
@@ -564,9 +567,9 @@ def digest_card(digest):
         for title, rows in digest["sections"]:
             body += [heading(title, len(rows)), grouped_table(rows, "Details", cap) if rows else NONE]
         (days, rows), (later_days, later) = digest["windows"]
-        body += [heading(WINDOW_TITLES[0], len(rows)), text_block(span(days), isSubtle=True, spacing="None"),
+        body += [heading(WINDOW_TITLES[0], len(rows)), text_block(span(days, digest["end"]), isSubtle=True, spacing="None"),
                  grouped_table(rows, "Dates", cap) if rows else NONE]
-        later_title = text_block(span(later_days), isSubtle=True, spacing="None")
+        later_title = text_block(span(later_days, digest["end"]), isSubtle=True, spacing="None")
         if later:
             ids = ["following-table", "following-show", "following-hide"]
             body += [{"type": "Container", "separator": True, "spacing": "Large",
